@@ -1,0 +1,638 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+import torchvision.transforms as transforms
+import torchvision.models as models
+import cv2
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import os
+from PIL import Image
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error, r2_score
+import warnings
+from typing import Tuple, Dict, List, Optional
+from dataclasses import dataclass
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+import json
+from tqdm import tqdm
+
+warnings.filterwarnings('ignore')
+
+@dataclass
+class BoneAgeResult:
+    """Results from bone age prediction"""
+    predicted_age_months: float
+    confidence: float
+    age_range_min: float
+    age_range_max: float
+    uncertainty: float
+
+class BoneAgeDataset(Dataset):
+    """Dataset class for bone age X-ray images"""
+    
+    def __init__(self, image_paths: List[str], ages_months: List[float], 
+                 genders: List[int], transform=None, is_training=True):
+        self.image_paths = image_paths
+        self.ages_months = ages_months
+        self.genders = genders  # 0 for female, 1 for male
+        self.transform = transform
+        self.is_training = is_training
+        
+        # Create augmentation pipeline
+        if is_training:
+            self.aug_transform = A.Compose([
+                A.Resize(512, 512),
+                A.Rotate(limit=15, p=0.5),
+                A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
+                A.GaussianBlur(blur_limit=3, p=0.3),
+                A.HorizontalFlip(p=0.5),
+                A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1, rotate_limit=10, p=0.5),
+                A.Normalize(mean=[0.485], std=[0.229]),
+                ToTensorV2()
+            ])
+        else:
+            self.aug_transform = A.Compose([
+                A.Resize(512, 512),
+                A.Normalize(mean=[0.485], std=[0.229]),
+                ToTensorV2()
+            ])
+    
+    def __len__(self):
+        return len(self.image_paths)
+    
+    def __getitem__(self, idx):
+        # Load image
+        image_path = self.image_paths[idx]
+        image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+        
+        if image is None:
+            raise ValueError(f"Could not load image: {image_path}")
+        
+        # Convert to 3-channel for pretrained models
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+        
+        # Apply augmentations
+        if self.aug_transform:
+            augmented = self.aug_transform(image=image)
+            image = augmented['image']
+        
+        # Get labels
+        age_months = torch.tensor(self.ages_months[idx], dtype=torch.float32)
+        gender = torch.tensor(self.genders[idx], dtype=torch.float32)
+        
+        return {
+            'image': image,
+            'age_months': age_months,
+            'gender': gender,
+            'image_path': image_path
+        }
+
+class BoneAgeModel(nn.Module):
+    """Multi-task neural network for bone age and gender prediction"""
+    
+    def __init__(self, backbone='efficientnet_b3', pretrained=True, dropout=0.3):
+        super(BoneAgeModel, self).__init__()
+        
+        # Load backbone
+        if backbone == 'efficientnet_b3':
+            from torchvision.models import efficientnet_b3
+            self.backbone = efficientnet_b3(pretrained=pretrained)
+            feature_dim = self.backbone.classifier[1].in_features
+            self.backbone.classifier = nn.Identity()
+        elif backbone == 'resnet50':
+            self.backbone = models.resnet50(pretrained=pretrained)
+            feature_dim = self.backbone.fc.in_features
+            self.backbone.fc = nn.Identity()
+        elif backbone == 'densenet121':
+            self.backbone = models.densenet121(pretrained=pretrained)
+            feature_dim = self.backbone.classifier.in_features
+            self.backbone.classifier = nn.Identity()
+        else:
+            raise ValueError(f"Unsupported backbone: {backbone}")
+        
+        # Feature processing layers
+        self.feature_processor = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(feature_dim, 512),
+            nn.ReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(dropout/2),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.BatchNorm1d(256)
+        )
+        
+        # Age regression head
+        self.age_head = nn.Sequential(
+            nn.Dropout(dropout/2),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1)
+        )
+        
+        # Gender classification head (auxiliary task)
+        self.gender_head = nn.Sequential(
+            nn.Dropout(dropout/2),
+            nn.Linear(256, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+            nn.Sigmoid()
+        )
+        
+        # Uncertainty estimation head
+        self.uncertainty_head = nn.Sequential(
+            nn.Dropout(dropout/2),
+            nn.Linear(256, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+            nn.Softplus()  # Ensures positive uncertainty
+        )
+    
+    def forward(self, x):
+        # Extract features
+        features = self.backbone(x)
+        processed_features = self.feature_processor(features)
+        
+        # Predictions
+        age_pred = self.age_head(processed_features)
+        gender_pred = self.gender_head(processed_features)
+        uncertainty = self.uncertainty_head(processed_features)
+        
+        return {
+            'age': age_pred.squeeze(),
+            'gender': gender_pred.squeeze(),
+            'uncertainty': uncertainty.squeeze()
+        }
+
+class BoneAgeTrainer:
+    """Training and evaluation class for bone age model"""
+    
+    def __init__(self, model, device='cuda'):
+        self.model = model.to(device)
+        self.device = device
+        self.train_losses = []
+        self.val_losses = []
+        self.val_maes = []
+        
+    def train_epoch(self, train_loader, optimizer, criterion_age, criterion_gender, 
+                   age_weight=1.0, gender_weight=0.3, uncertainty_weight=0.1):
+        """Train for one epoch"""
+        self.model.train()
+        total_loss = 0
+        total_age_loss = 0
+        total_gender_loss = 0
+        total_uncertainty_loss = 0
+        
+        pbar = tqdm(train_loader, desc="Training")
+        for batch in pbar:
+            images = batch['image'].to(self.device)
+            ages = batch['age_months'].to(self.device)
+            genders = batch['gender'].to(self.device)
+            
+            optimizer.zero_grad()
+            
+            # Forward pass
+            outputs = self.model(images)
+            
+            # Calculate losses
+            age_loss = criterion_age(outputs['age'], ages)
+            gender_loss = criterion_gender(outputs['gender'], genders)
+            
+            # Uncertainty loss (encourage reasonable uncertainty estimates)
+            uncertainty_loss = torch.mean(outputs['uncertainty'])
+            
+            # Combined loss
+            total_loss_batch = (age_weight * age_loss + 
+                              gender_weight * gender_loss + 
+                              uncertainty_weight * uncertainty_loss)
+            
+            # Backward pass
+            total_loss_batch.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            optimizer.step()
+            
+            # Update running losses
+            total_loss += total_loss_batch.item()
+            total_age_loss += age_loss.item()
+            total_gender_loss += gender_loss.item()
+            total_uncertainty_loss += uncertainty_loss.item()
+            
+            # Update progress bar
+            pbar.set_postfix({
+                'Loss': f'{total_loss_batch.item():.4f}',
+                'Age MAE': f'{age_loss.item():.2f}',
+                'Gender': f'{gender_loss.item():.4f}'
+            })
+        
+        avg_loss = total_loss / len(train_loader)
+        self.train_losses.append(avg_loss)
+        
+        return {
+            'total_loss': avg_loss,
+            'age_loss': total_age_loss / len(train_loader),
+            'gender_loss': total_gender_loss / len(train_loader),
+            'uncertainty_loss': total_uncertainty_loss / len(train_loader)
+        }
+    
+    def validate(self, val_loader, criterion_age, criterion_gender):
+        """Validate the model"""
+        self.model.eval()
+        total_loss = 0
+        age_predictions = []
+        age_targets = []
+        gender_predictions = []
+        gender_targets = []
+        
+        with torch.no_grad():
+            for batch in tqdm(val_loader, desc="Validating"):
+                images = batch['image'].to(self.device)
+                ages = batch['age_months'].to(self.device)
+                genders = batch['gender'].to(self.device)
+                
+                outputs = self.model(images)
+                
+                # Calculate losses
+                age_loss = criterion_age(outputs['age'], ages)
+                gender_loss = criterion_gender(outputs['gender'], genders)
+                total_loss += (age_loss + 0.3 * gender_loss).item()
+                
+                # Store predictions for metrics
+                age_predictions.extend(outputs['age'].cpu().numpy())
+                age_targets.extend(ages.cpu().numpy())
+                gender_predictions.extend(outputs['gender'].cpu().numpy())
+                gender_targets.extend(genders.cpu().numpy())
+        
+        avg_loss = total_loss / len(val_loader)
+        age_mae = mean_absolute_error(age_targets, age_predictions)
+        age_r2 = r2_score(age_targets, age_predictions)
+        
+        gender_accuracy = np.mean((np.array(gender_predictions) > 0.5) == np.array(gender_targets))
+        
+        self.val_losses.append(avg_loss)
+        self.val_maes.append(age_mae)
+        
+        return {
+            'val_loss': avg_loss,
+            'age_mae': age_mae,
+            'age_r2': age_r2,
+            'gender_accuracy': gender_accuracy,
+            'predictions': age_predictions,
+            'targets': age_targets
+        }
+    
+    def fit(self, train_loader, val_loader, epochs=50, learning_rate=1e-4, 
+            weight_decay=1e-5, patience=10):
+        """Train the model with early stopping"""
+        
+        # Setup optimizer and criteria
+        optimizer = optim.AdamW(self.model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+        
+        criterion_age = nn.L1Loss()  # MAE for age regression
+        criterion_gender = nn.BCELoss()  # Binary cross-entropy for gender
+        
+        best_val_mae = float('inf')
+        patience_counter = 0
+        
+        print(f"Starting training for {epochs} epochs...")
+        
+        for epoch in range(epochs):
+            print(f"\nEpoch {epoch + 1}/{epochs}")
+            print("-" * 30)
+            
+            # Train
+            train_metrics = self.train_epoch(train_loader, optimizer, criterion_age, criterion_gender)
+            
+            # Validate
+            val_metrics = self.validate(val_loader, criterion_age, criterion_gender)
+            
+            # Learning rate scheduling
+            scheduler.step(val_metrics['val_loss'])
+            
+            # Print metrics
+            print(f"Train Loss: {train_metrics['total_loss']:.4f}")
+            print(f"Val Loss: {val_metrics['val_loss']:.4f}")
+            print(f"Val Age MAE: {val_metrics['age_mae']:.2f} months")
+            print(f"Val Age R²: {val_metrics['age_r2']:.4f}")
+            print(f"Val Gender Acc: {val_metrics['gender_accuracy']:.4f}")
+            print(f"Current LR: {optimizer.param_groups[0]['lr']:.6f}")
+            
+            # Early stopping
+            if val_metrics['age_mae'] < best_val_mae:
+                best_val_mae = val_metrics['age_mae']
+                patience_counter = 0
+                # Save best model
+                torch.save({
+                    'model_state_dict': self.model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'epoch': epoch,
+                    'val_mae': best_val_mae
+                }, 'best_bone_age_model.pth')
+                print(f"💾 New best model saved! MAE: {best_val_mae:.2f} months")
+            else:
+                patience_counter += 1
+                
+            if patience_counter >= patience:
+                print(f"Early stopping triggered after {patience} epochs without improvement")
+                break
+        
+        # Load best model
+        checkpoint = torch.load('best_bone_age_model.pth')
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        print(f"Loaded best model with MAE: {checkpoint['val_mae']:.2f} months")
+        
+        return {
+            'best_val_mae': best_val_mae,
+            'train_losses': self.train_losses,
+            'val_losses': self.val_losses,
+            'val_maes': self.val_maes
+        }
+
+class BoneAgePredictor:
+    """Inference class for bone age prediction"""
+    
+    def __init__(self, model_path: str, device='cuda'):
+        self.device = device
+        self.model = None
+        self.load_model(model_path)
+        
+        # Preprocessing for inference
+        self.transform = A.Compose([
+            A.Resize(512, 512),
+            A.Normalize(mean=[0.485], std=[0.229]),
+            ToTensorV2()
+        ])
+    
+    def load_model(self, model_path: str):
+        """Load trained model"""
+        self.model = BoneAgeModel()
+        checkpoint = torch.load(model_path, map_location=self.device)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.model.to(self.device)
+        self.model.eval()
+        print(f"Model loaded from {model_path}")
+    
+    def predict_single_image(self, image_path: str, monte_carlo_samples=10) -> BoneAgeResult:
+        """Predict bone age for a single image with uncertainty estimation"""
+        
+        # Load and preprocess image
+        image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+        if image is None:
+            raise ValueError(f"Could not load image: {image_path}")
+        
+        # Convert to RGB
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+        
+        # Apply preprocessing
+        transformed = self.transform(image=image)
+        image_tensor = transformed['image'].unsqueeze(0).to(self.device)
+        
+        predictions = []
+        uncertainties = []
+        
+        with torch.no_grad():
+            # Monte Carlo dropout for uncertainty estimation
+            for _ in range(monte_carlo_samples):
+                # Enable dropout during inference for uncertainty
+                self.model.train()  # This enables dropout
+                output = self.model(image_tensor)
+                predictions.append(output['age'].cpu().item())
+                uncertainties.append(output['uncertainty'].cpu().item())
+        
+        # Calculate statistics
+        pred_mean = np.mean(predictions)
+        pred_std = np.std(predictions)
+        uncertainty_mean = np.mean(uncertainties)
+        
+        # Combine epistemic (model) and aleatoric (data) uncertainty
+        total_uncertainty = np.sqrt(pred_std**2 + uncertainty_mean**2)
+        
+        # Calculate confidence (inverse of uncertainty)
+        confidence = 1.0 / (1.0 + total_uncertainty / 12.0)  # Normalize by 12 months
+        
+        # Age range based on uncertainty
+        age_range_min = max(0, pred_mean - 1.96 * total_uncertainty)
+        age_range_max = pred_mean + 1.96 * total_uncertainty
+        
+        return BoneAgeResult(
+            predicted_age_months=pred_mean,
+            confidence=confidence,
+            age_range_min=age_range_min,
+            age_range_max=age_range_max,
+            uncertainty=total_uncertainty
+        )
+    
+    def predict_batch(self, image_paths: List[str]) -> List[BoneAgeResult]:
+        """Predict bone age for multiple images"""
+        results = []
+        for image_path in tqdm(image_paths, desc="Predicting"):
+            try:
+                result = self.predict_single_image(image_path)
+                results.append(result)
+            except Exception as e:
+                print(f"Error processing {image_path}: {e}")
+                results.append(None)
+        return results
+
+def create_demo_dataset(csv_path: str = None) -> Tuple[List[str], List[float], List[int]]:
+    """Create or load dataset for training"""
+    
+    if csv_path and os.path.exists(csv_path):
+        # Load from RSNA dataset or custom CSV
+        df = pd.read_csv(csv_path)
+        
+        # Expected columns: 'image_path', 'boneage' (in months), 'male' (0/1)
+        image_paths = df.iloc[:, 0].tolist()  # First column (image paths)
+        ages_months = df.iloc[:, 1].tolist()  # Second column (ages)
+        genders = df.iloc[:, 2].tolist()      # Third column (gender)
+        return image_paths, ages_months, genders
+    
+    else:
+        # Demo with synthetic data (replace with real dataset)
+        print("⚠️ No dataset CSV provided. Creating demo dataset structure...")
+        print("For real training, you need:")
+        print("1. CSV file with columns: 'image_path', 'boneage', 'male'")
+        print("2. X-ray images in the specified paths")
+        
+        # Return empty lists for demo
+        return [], [], []
+
+def plot_training_history(train_losses: List[float], val_losses: List[float], val_maes: List[float]):
+    """Plot training history"""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
+    
+    # Loss plot
+    ax1.plot(train_losses, label='Training Loss')
+    ax1.plot(val_losses, label='Validation Loss')
+    ax1.set_xlabel('Epoch')
+    ax1.set_ylabel('Loss')
+    ax1.set_title('Training and Validation Loss')
+    ax1.legend()
+    ax1.grid(True)
+    
+    # MAE plot
+    ax2.plot(val_maes, label='Validation MAE', color='orange')
+    ax2.set_xlabel('Epoch')
+    ax2.set_ylabel('MAE (months)')
+    ax2.set_title('Validation Mean Absolute Error')
+    ax2.legend()
+    ax2.grid(True)
+    
+    plt.tight_layout()
+    plt.show()
+
+def evaluate_model(predictor: BoneAgePredictor, test_image_paths: List[str], 
+                  test_ages: List[float]) -> Dict:
+    """Evaluate model performance"""
+    print("Evaluating model performance...")
+    
+    predictions = []
+    uncertainties = []
+    confidences = []
+    
+    for image_path in tqdm(test_image_paths):
+        try:
+            result = predictor.predict_single_image(image_path)
+            predictions.append(result.predicted_age_months)
+            uncertainties.append(result.uncertainty)
+            confidences.append(result.confidence)
+        except Exception as e:
+            print(f"Error predicting {image_path}: {e}")
+            predictions.append(np.nan)
+            uncertainties.append(np.nan)
+            confidences.append(np.nan)
+    
+    # Remove NaN values
+    valid_indices = ~np.isnan(predictions)
+    predictions = np.array(predictions)[valid_indices]
+    test_ages = np.array(test_ages)[valid_indices]
+    uncertainties = np.array(uncertainties)[valid_indices]
+    confidences = np.array(confidences)[valid_indices]
+    
+    # Calculate metrics
+    mae = mean_absolute_error(test_ages, predictions)
+    r2 = r2_score(test_ages, predictions)
+    rmse = np.sqrt(np.mean((predictions - test_ages)**2))
+    
+    # Clinical accuracy (within 1 year)
+    within_12_months = np.mean(np.abs(predictions - test_ages) <= 12) * 100
+    
+    results = {
+        'mae': mae,
+        'rmse': rmse,
+        'r2': r2,
+        'within_12_months': within_12_months,
+        'mean_uncertainty': np.mean(uncertainties),
+        'mean_confidence': np.mean(confidences),
+        'predictions': predictions,
+        'targets': test_ages,
+        'uncertainties': uncertainties
+    }
+    
+    print(f"Test Results:")
+    print(f"  MAE: {mae:.2f} months")
+    print(f"  RMSE: {rmse:.2f} months")
+    print(f"  R²: {r2:.4f}")
+    print(f"  Accuracy (±12 months): {within_12_months:.1f}%")
+    print(f"  Mean uncertainty: {np.mean(uncertainties):.2f} months")
+    print(f"  Mean confidence: {np.mean(confidences):.3f}")
+    
+    return results
+
+def main():
+    """Main training and evaluation pipeline"""
+    
+    # Configuration
+    config = {
+        'data_csv': 'bone_age_dataset.csv',  # Path to your dataset CSV
+        'batch_size': 16,
+        'epochs': 50,
+        'learning_rate': 1e-4,
+        'backbone': 'efficientnet_b3',  # or 'resnet50', 'densenet121'
+        'device': 'cuda' if torch.cuda.is_available() else 'cpu'
+    }
+    
+    print(f"Using device: {config['device']}")
+    
+    # Load dataset
+    image_paths, ages_months, genders = create_demo_dataset(config['data_csv'])
+    
+    if not image_paths:
+        print("❌ No dataset loaded. Please provide a valid CSV file with bone age data.")
+        print("\nFor demo purposes, here's how to use the trained model:")
+        print("""
+# After training, use the model like this:
+predictor = BoneAgePredictor('best_bone_age_model.pth')
+result = predictor.predict_single_image('path/to/xray.jpg')
+print(f"Predicted age: {result.predicted_age_months:.1f} months")
+print(f"Confidence: {result.confidence:.3f}")
+print(f"Age range: {result.age_range_min:.1f} - {result.age_range_max:.1f} months")
+        """)
+        return
+    
+    # Split dataset
+    train_paths, test_paths, train_ages, test_ages, train_genders, test_genders = train_test_split(
+        image_paths, ages_months, genders, test_size=0.2, random_state=42, stratify=genders
+    )
+    
+    train_paths, val_paths, train_ages, val_ages, train_genders, val_genders = train_test_split(
+        train_paths, train_ages, train_genders, test_size=0.2, random_state=42, stratify=train_genders
+    )
+    
+    print(f"Dataset split:")
+    print(f"  Training: {len(train_paths)} images")
+    print(f"  Validation: {len(val_paths)} images")
+    print(f"  Test: {len(test_paths)} images")
+    
+    # Create datasets and dataloaders
+    train_dataset = BoneAgeDataset(train_paths, train_ages, train_genders, is_training=True)
+    val_dataset = BoneAgeDataset(val_paths, val_ages, val_genders, is_training=False)
+    test_dataset = BoneAgeDataset(test_paths, test_ages, test_genders, is_training=False)
+    
+    train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True, num_workers=4)
+    val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False, num_workers=4)
+    test_loader = DataLoader(test_dataset, batch_size=config['batch_size'], shuffle=False, num_workers=4)
+    
+    # Create model
+    model = BoneAgeModel(backbone=config['backbone'])
+    trainer = BoneAgeTrainer(model, device=config['device'])
+    
+    # Train model
+    training_results = trainer.fit(
+        train_loader, 
+        val_loader, 
+        epochs=config['epochs'],
+        learning_rate=config['learning_rate']
+    )
+    
+    # Plot training history
+    plot_training_history(
+        training_results['train_losses'],
+        training_results['val_losses'],
+        training_results['val_maes']
+    )
+    
+    # Evaluate on test set
+    predictor = BoneAgePredictor('best_bone_age_model.pth', device=config['device'])
+    test_results = evaluate_model(predictor, test_paths, test_ages)
+    
+    # Save results
+    results_summary = {
+        'config': config,
+        'training_results': training_results,
+        'test_results': {k: v for k, v in test_results.items() if k not in ['predictions', 'targets', 'uncertainties']}
+    }
+    
+    with open('training_results.json', 'w') as f:
+        json.dump(results_summary, f, indent=2)
+    
+    print("\n✅ Training completed! Model saved as 'best_bone_age_model.pth'")
+    print("📊 Results saved to 'training_results.json'")
+
+if __name__ == "__main__":
+    main()
+    
