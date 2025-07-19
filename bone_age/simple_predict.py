@@ -162,14 +162,14 @@ def predict_bone_age(image_path, model, device, monte_carlo_samples=10):
     
     # Results
     print(f"📊 BONE AGE PREDICTION")
-    print(f"{'='*50}")
+    # print(f"{'='*50}")
     print(f"🦴 Age: {pred_mean:.1f} months ({pred_mean/12:.1f} years)")
-    print(f"📈 Confidence: {confidence:.1%}")
-    print(f"📏 Range: {age_range_min:.1f} - {age_range_max:.1f} months")
-    print(f"🎯 Uncertainty: ±{total_uncertainty:.1f} months")
-    print(f"👤 Gender: {predicted_gender} ({gender_confidence:.1%})")
-    print(f"🏷️  Stage: {stage}")
-    print(f"{'='*50}")
+    # print(f"📈 Confidence: {confidence:.1%}")
+    # print(f"📏 Range: {age_range_min:.1f} - {age_range_max:.1f} months")
+    # print(f"🎯 Uncertainty: ±{total_uncertainty:.1f} months")
+    # print(f"👤 Gender: {predicted_gender} ({gender_confidence:.1%})")
+    # print(f"🏷️  Stage: {stage}")
+    # print(f"{'='*50}")
     
     return {
         'age_months': pred_mean,
@@ -186,77 +186,53 @@ def main():
     # Load model
     try:
         model, device = load_model('best_bone_age_model.pth')
+        if model is None:
+            print("❌ Failed to load model")
+            return
     except Exception as e:
         print(f"❌ Error loading model: {e}")
         return
     
-    # Get image from user
-    image_path = input("Enter image path (e.g., ./1500.png): ").strip()
-    
-    if not os.path.exists(image_path):
-        print(f"❌ Image not found: {image_path}")
-        # Show available images
-        image_extensions = ['.png', '.jpg', '.jpeg', '.bmp', '.tiff']
-        available_images = [f for f in os.listdir('.') 
-                           if any(f.lower().endswith(ext) for ext in image_extensions)]
-        if available_images:
-            print("Available images:")
-            for img in available_images[:10]:  # Show first 10
-                print(f"  - {img}")
-        return
-    
-    try:
-        # Make prediction
-        result = predict_bone_age(image_path, model, device)
-        
-        # Option for batch processing
-        print("\n" + "="*50)
-        batch = input("Analyze more images? (y/n): ").strip().lower()
-        
-        if batch == 'y':
-            # Find all images in directory
-            image_extensions = ['.png', '.jpg', '.jpeg', '.bmp', '.tiff']
-            all_images = [f for f in os.listdir('.') 
-                         if any(f.lower().endswith(ext) for ext in image_extensions)]
+    # Main loop for processing images
+    while True:
+        # Get image from user
+        while True:  # Keep asking until valid image path or user wants to quit
+            image_path = input("\nEnter image path (e.g., ./1500.png): ").strip()
             
-            print(f"\nFound {len(all_images)} images. Analyzing all...")
-            
-            results = []
-            for img in all_images:
-                try:
-                    print(f"\n--- Processing {img} ---")
-                    result = predict_bone_age(img, model, device)
-                    results.append((img, result))
-                except Exception as e:
-                    print(f"❌ Error with {img}: {e}")
-                    results.append((img, None))
-            
-            # Save results
-            with open('prediction_results.txt', 'w') as f:
-                f.write("BONE AGE PREDICTIONS\n")
-                f.write("=" * 50 + "\n\n")
-                
-                for img, res in results:
-                    f.write(f"Image: {img}\n")
-                    if res:
-                        f.write(f"Age: {res['age_months']:.1f} months ({res['age_years']:.1f} years)\n")
-                        f.write(f"Confidence: {res['confidence']:.1%}\n")
-                        f.write(f"Range: {res['age_range'][0]:.1f} - {res['age_range'][1]:.1f} months\n")
-                        f.write(f"Gender: {res['gender']} ({res['gender_confidence']:.1%})\n")
-                        f.write(f"Stage: {res['stage']}\n")
+            if os.path.exists(image_path):
+                break  # Valid path found, exit inner loop
+            else:
+                print(f"❌ Image not found: {image_path}")
+                # Ask if user wants to continue trying
+                while True:
+                    continue_choice = input("Try again? (y/n): ").strip().lower()
+                    if continue_choice in ['y', 'yes']:
+                        break  # Break inner input validation loop, continue asking for image
+                    elif continue_choice in ['n', 'no']:
+                        print("👋 Goodbye!")
+                        return  # Exit the entire function
                     else:
-                        f.write("Prediction failed\n")
-                    f.write("-" * 30 + "\n")
-            
-            print(f"\n📁 Results saved to 'prediction_results.txt'")
-            print(f"📊 Successfully analyzed {len([r for r in results if r[1] is not None])}/{len(results)} images")
+                        print("Please enter 'y' or 'n'")
+                
+                if continue_choice in ['n', 'no']:
+                    return  # Exit if user doesn't want to continue
         
-    except Exception as e:
-        print(f"❌ Error during prediction: {e}")
-        print("This might be due to:")
-        print("1. Image format not supported")
-        print("2. Image too small or corrupted")
-        print("3. Model architecture mismatch")
+        # Make prediction with valid image path
+        try:
+            result = predict_bone_age(image_path, model, device)
+        except Exception as e:
+            print(f"❌ Error with model prediction: {e}")
+        
+        # Ask if user wants to analyze more images
+        while True:
+            batch = input("\nAnalyze more images? (y/n): ").strip().lower()
+            if batch in ['y', 'Y', 'yes', 'Yes', 'YES']:
+                break  # Continue outer loop
+            elif batch in ['n', 'no', 'NO', 'N']:
+                print("👋 Goodbye!")
+                return  # Exit the function
+            else:
+                print("Please enter 'y' or 'n'")
 
 if __name__ == "__main__":
     main()
