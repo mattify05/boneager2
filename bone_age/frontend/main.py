@@ -1,78 +1,38 @@
-
 #!/usr/bin/env python3
 
 import streamlit as st
-import pydicom
-from PIL import Image
-import numpy as np
-import pandas as pd
-import time
+from app import home, analysis, login
 
-st.title("Bone-Ager")
-st.subheader("An automatic paediatric bone age assessment tool")
+if st.session_state.get("force_rerun"):
+    del st.session_state["force_rerun"]
+    st.rerun()
 
-st.text_input("What is your name?", key="name")
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
 
-option = st.selectbox('What is the gender?', ('Female', 'Male', 'Unknown'))
-st.write('You selected:', option)
+if "show_login" not in st.session_state:
+    st.session_state.show_login = False
 
-st.sidebar.header('Home')
-st.sidebar.subheader('Our Github')
-st.sidebar.subheader('About Us')
-st.sidebar.subheader('Contact Us')
-    
-uploaded_file = st.file_uploader(
-    "Upload X-ray image (JPEG, PNG, or DICOM)", 
-    type=["jpeg", "jpg", "png", "dcm"]
-)
-
-# Utility: normalize pixel values to 0-255 for display
-def normalize_to_uint8(image):
-    if np.max(image) == np.min(image):
-        return np.zeros_like(image, dtype=np.uint8)
-    image = image.astype(np.float32)
-    image = 255 * (image - np.min(image)) / (np.max(image) - np.min(image))
-    return image.astype(np.uint8)
-
-# Placeholder function for bone age prediction
-def estimate_bone_age(image_array):
-    # TODO: Replace this with your ML model
-    return 12.5  
-
-if uploaded_file is not None:
-    st.success("File uploaded successfully!")
-    file_ext = uploaded_file.name.lower().split('.')[-1]
-
-    st.write('Starting analysis...')
-    latest_iteration = st.empty()
-    bar = st.progress(0)
-
-    for i in range(100):
-        bar.progress(i + 1)
-        time.sleep(0.1)
-    
-    st.write('...and now we\'re done!'
-             )
-    if file_ext == "dcm":
-        # Load and anonymize DICOM
-        dicom_data = pydicom.dcmread(uploaded_file)
-        for tag in ["PatientName", "PatientID", "PatientBirthDate"]:
-            if tag in dicom_data:
-                dicom_data.data_element(tag).value = ""
-
-        # Get image data and normalize
-        image = dicom_data.pixel_array
-        image = normalize_to_uint8(image)
-
-        st.image(image, caption="DICOM Image Preview", use_container_width=True)
-
+if not st.session_state.authenticated:
+    if st.session_state.show_login:
+        login.login_form()
     else:
-        image = Image.open(uploaded_file)
-        st.image(image, caption="Image Preview", use_container_width=True)
-        image = np.array(image)  # convert for processing
+        login.register_user()
+else:   
+    st.button("Logout", on_click=login.logout)
 
-    # Bone age estimation (placeholder)
-    bone_age = estimate_bone_age(image)
-    st.success(f"Estimated Bone Age: {bone_age} years")
+    st.set_page_config(
+        page_title="Bone-Ager", 
+        page_icon=":bone:",
+        layout="wide",
+        menu_items={
+            'Get Help': 'https://www.extremelycoolapp.com/help',
+            'Report a bug': "https://www.extremelycoolapp.com/bug",
+            'About': "# This is a header. This is an *extremely* cool app!"
+        }
+    )
 
+    home.main_ui()
 
+    if st.session_state.get("uploaded_file"):
+        analysis.display()
