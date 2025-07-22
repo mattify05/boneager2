@@ -31,7 +31,24 @@ pip install -r requirements.txt
 ```
 
 ## Usage
+After setting up the code on VSCode, head over to [**this link**](www.google.com) to download the BoneAger model.
+Once it is installed, drag it from your Applications / Downloads folder into the
+bone_age directory contained in your GitHub repo. Below are a few images that can
+show you how to do this:
 
+(image1)
+
+(image2)
+
+(image3)
+
+To get started with bone processing, type the following into your terminal:
+```bash
+cd bone_age/frontend
+streamlit run main.py
+```
+
+Next,
 ---
 
 ## :bulb: Credits
