@@ -10,11 +10,6 @@ def main_ui():
 
     option = st.selectbox('What is the sex?', ('Female', 'Male', 'Unknown'))
     st.write('You selected:', option)
-
-    st.sidebar.header('Home')
-    st.sidebar.subheader('Our Github')
-    st.sidebar.subheader('About Us')
-    st.sidebar.subheader('Contact Us')
         
     uploaded = st.file_uploader(
         "Upload X-ray image (JPEG, PNG, or DICOM)", 
