@@ -1,0 +1,17 @@
+users:
+  LarissaV:
+    password: 8b8df7141bf2213cea9867e71b2bebc69a843728811cd559e5ef6b27afe25991
+  admin:
+    password: 8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918
+  larissa:
+    password: 95a8f6568fa7ad6aba1bdcd6620a471a0aca7d4c447f508a94ae4aab2ed86bd3
+  mei test:
+    password: cf80cd8aed482d5d1527d7dc72fceff84e6326592848447d2dc0b0e87dfc9a90
+  snoopy snoop:
+    password: eeecf85814215b61dd9f7728f2d2011fd2b615b4fdaee0edd207dfefe3612cdf
+  test:
+    password: 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+  test123:
+    password: ecd71870d1963316a97e3ac3408c9835ad8cf0f3c1bc703527c30265534f75ae
+  testing:
+    password: cf80cd8aed482d5d1527d7dc72fceff84e6326592848447d2dc0b0e87dfc9a90
