@@ -24,6 +24,7 @@ def get_data():
     )
     return df
 
+# Converts the dataframe to a csv file, so it can be downloaded
 @st.cache_data
 def convert_for_download(df):
     return df.to_csv().encode("utf-8")
