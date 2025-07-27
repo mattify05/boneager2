@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import streamlit as st
-from app import home, analysis, login, about, contact
+from app import home, analysis, login, about, contact, helpers
 
 if st.session_state.get("force_rerun"):
     del st.session_state["force_rerun"]
@@ -11,6 +11,7 @@ st.set_page_config(
         page_title="Bone-Ager", 
         page_icon=":bone:",
         layout="wide",
+        # can update the menu items 
         menu_items={
             'Get Help': 'https://www.extremelycoolapp.com/help',
             'Report a bug': "https://www.extremelycoolapp.com/bug",
@@ -28,6 +29,8 @@ if "show_login" not in st.session_state:
 if "current_page" not in st.session_state:
     st.session_state.current_page = "Home"
 
+current_page = st.session_state.current_page
+
 if not st.session_state.authenticated:
     if st.session_state.show_login:
         login.login_form()
@@ -36,12 +39,11 @@ if not st.session_state.authenticated:
 else:   
     st.button("Logout", on_click=login.logout)
 
-    current_page = st.session_state.current_page
-
     if current_page == "Home":
         home.main_ui()
-        if st.session_state.get("uploaded_file"):
+        if st.session_state.get("uploaded_file") and not st.session_state.get("analysis_done"):
             analysis.display()
+            st.session_state.analysis_done = True
     elif current_page == "About":
         about.render_about()
     elif current_page == "Contact":

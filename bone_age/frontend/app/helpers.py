@@ -28,3 +28,8 @@ def get_data():
 @st.cache_data
 def convert_for_download(df):
     return df.to_csv().encode("utf-8")
+
+# clears the analysis_done session state 
+def reset_analysis():
+    if "analysis_done" in st.session_state:
+        del st.session_state["analysis_done"]
