@@ -40,6 +40,7 @@ def register_user():
     new_user = st.text_input("New Username", key="reg_user")
     new_pass = st.text_input("New Password", type="password", key="reg_pass")
 
+   
     if st.button("Register"):
         users = load_users()
         if new_user in users:
@@ -50,10 +51,22 @@ def register_user():
             save_user(new_user, new_pass)
             st.success("User registered! Please log in.")
             st.session_state.show_login = True
-    
+            st.rerun()
+
+    st.text("")
+    st.text("")
+    st.text("")
+
     st.markdown("Already have an account? :point_down:")
     if st.button("Log in here"):
         st.session_state.show_login = True
+        st.rerun()
+
+    if st.button("Continue as Guest"):
+        st.session_state.authenticated = True
+        st.session_state.user = "Guest"
+        st.session_state.current_page = "Home"
+        st.rerun()
 
 # ------------------------------------------------------------------------------
 # Log in/out Functions
@@ -72,6 +85,7 @@ def login_form():
     st.markdown("Don't have an account?")
     if st.button("Create one here"):
         st.session_state.show_login = False
+        st.rerun()
 
 # Logs the current user out by clearing the session state and any query parameters
 def logout():

@@ -3,10 +3,14 @@ users:
     password: 8b8df7141bf2213cea9867e71b2bebc69a843728811cd559e5ef6b27afe25991
   admin:
     password: 8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918
+  admin1:
+    password: 25f43b1486ad95a1398e3eeb3d83bc4010015fcc9bedb35b432e00298d5021f7
   larissa:
     password: 95a8f6568fa7ad6aba1bdcd6620a471a0aca7d4c447f508a94ae4aab2ed86bd3
   mei test:
     password: cf80cd8aed482d5d1527d7dc72fceff84e6326592848447d2dc0b0e87dfc9a90
+  pa:
+    password: 9513229d435978263d82902c59d4e0fb86c941a9bf09b605cd8a6643f40149a8
   snoopy snoop:
     password: eeecf85814215b61dd9f7728f2d2011fd2b615b4fdaee0edd207dfefe3612cdf
   test:
@@ -15,3 +19,5 @@ users:
     password: ecd71870d1963316a97e3ac3408c9835ad8cf0f3c1bc703527c30265534f75ae
   testing:
     password: cf80cd8aed482d5d1527d7dc72fceff84e6326592848447d2dc0b0e87dfc9a90
+  testing1234:
+    password: 3441df0babc2a2dda551d7cd39fb235bc4e09cd1e4556bf261bb49188f548348

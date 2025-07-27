@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import streamlit as st
-from app import home, analysis, login, about, contact, helpers
+from app import home, analysis, login, about, contact
 
 if st.session_state.get("force_rerun"):
     del st.session_state["force_rerun"]
@@ -36,7 +36,8 @@ if not st.session_state.authenticated:
         login.login_form()
     else:
         login.register_user()
-else:   
+else:
+    st.write(f"Welcome {st.session_state.get('user', 'User')}!")   
     st.button("Logout", on_click=login.logout)
 
     if current_page == "Home":
