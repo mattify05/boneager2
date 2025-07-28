@@ -8,3 +8,6 @@ matplotlib
 Pillow
 scikit-learn
 tqdm
+streamlit
+pydicom
+time
