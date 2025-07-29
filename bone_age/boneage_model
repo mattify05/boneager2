@@ -19,6 +19,8 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import json
 from tqdm import tqdm
+import shutil
+from datetime import datetime
 
 warnings.filterwarnings('ignore')
 
@@ -177,6 +179,56 @@ class BoneAgeTrainer:
         self.train_losses = []
         self.val_losses = []
         self.val_maes = []
+    
+    def load_checkpoint(self, checkpoint_path: str):
+        """Load a previous checkpoint to resume training"""
+        if os.path.exists(checkpoint_path):
+            print(f"📂 Loading checkpoint from {checkpoint_path}")
+            # FIX: Add weights_only=False for PyTorch 2.6+ compatibility
+            checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+            
+            # Load training history if available
+            if 'train_losses' in checkpoint:
+                self.train_losses = checkpoint['train_losses']
+            if 'val_losses' in checkpoint:
+                self.val_losses = checkpoint['val_losses']
+            if 'val_maes' in checkpoint:
+                self.val_maes = checkpoint['val_maes']
+                
+            return checkpoint
+        else:
+            print(f"⚠️ No checkpoint found at {checkpoint_path}, starting from scratch")
+            return None
+    
+    def save_checkpoint(self, checkpoint_path: str, epoch: int, val_mae: float, 
+                       optimizer, scheduler, is_best=False):
+        """Save model checkpoint with comprehensive state"""
+        checkpoint = {
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'epoch': epoch,
+            'val_mae': val_mae,
+            'train_losses': self.train_losses,
+            'val_losses': self.val_losses,
+            'val_maes': self.val_maes,
+            'timestamp': datetime.now().isoformat(),
+            'device': str(self.device)
+        }
+        
+        torch.save(checkpoint, checkpoint_path)
+        
+        if is_best:
+            # Also save as best model
+            best_path = checkpoint_path.replace('.pth', '_best.pth')
+            shutil.copy2(checkpoint_path, best_path)
+            
+            # Also save to root directory for easy access
+            root_best_path = 'best_bone_age_model.pth'
+            shutil.copy2(checkpoint_path, root_best_path)
+            print(f"💾 New best model saved! MAE: {val_mae:.2f} months")
+            print(f"📂 Model also saved as: {root_best_path}")
         
     def train_epoch(self, train_loader, optimizer, criterion_age, criterion_gender, 
                    age_weight=1.0, gender_weight=0.3, uncertainty_weight=0.1):
@@ -285,8 +337,8 @@ class BoneAgeTrainer:
         }
     
     def fit(self, train_loader, val_loader, epochs=50, learning_rate=1e-4, 
-            weight_decay=1e-5, patience=10):
-        """Train the model with early stopping"""
+            weight_decay=1e-5, patience=10, resume_from=None, model_name='bone_age_model'):
+        """Train the model with early stopping and optional resume capability"""
         
         # Setup optimizer and criteria
         optimizer = optim.AdamW(self.model.parameters(), lr=learning_rate, weight_decay=weight_decay)
@@ -297,11 +349,30 @@ class BoneAgeTrainer:
         
         best_val_mae = float('inf')
         patience_counter = 0
+        start_epoch = 0
+        last_epoch = start_epoch
         
-        print(f"Starting training for {epochs} epochs...")
+        # Create model directory
+        model_dir = f'models/{model_name}'
+        os.makedirs(model_dir, exist_ok=True)
         
-        for epoch in range(epochs):
-            print(f"\nEpoch {epoch + 1}/{epochs}")
+        # Resume from checkpoint if provided
+        if resume_from and os.path.exists(resume_from):
+            checkpoint = self.load_checkpoint(resume_from)
+            if checkpoint:
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                if 'scheduler_state_dict' in checkpoint:
+                    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                start_epoch = checkpoint['epoch'] + 1
+                best_val_mae = checkpoint['val_mae']
+                print(f"✅ Resuming from epoch {start_epoch}, best MAE: {best_val_mae:.2f} months")
+        
+        print(f"🚀 Starting training for {epochs} epochs (from epoch {start_epoch})...")
+        print(f"📁 Model checkpoints will be saved to: {model_dir}")
+        
+        for epoch in range(start_epoch, start_epoch + epochs):
+            last_epoch = epoch  # Track the last completed epoch
+            print(f"\nEpoch {epoch + 1}/{start_epoch + epochs}")
             print("-" * 30)
             
             # Train
@@ -321,35 +392,293 @@ class BoneAgeTrainer:
             print(f"Val Gender Acc: {val_metrics['gender_accuracy']:.4f}")
             print(f"Current LR: {optimizer.param_groups[0]['lr']:.6f}")
             
+            # Save regular checkpoint
+            checkpoint_path = f'{model_dir}/checkpoint_epoch_{epoch+1}.pth'
+            is_best = val_metrics['age_mae'] < best_val_mae
+            
+            self.save_checkpoint(checkpoint_path, epoch, val_metrics['age_mae'], 
+                               optimizer, scheduler, is_best)
+            
             # Early stopping
-            if val_metrics['age_mae'] < best_val_mae:
+            if is_best:
                 best_val_mae = val_metrics['age_mae']
                 patience_counter = 0
-                # Save best model
-                torch.save({
-                    'model_state_dict': self.model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'epoch': epoch,
-                    'val_mae': best_val_mae
-                }, 'best_bone_age_model.pth')
-                print(f"💾 New best model saved! MAE: {best_val_mae:.2f} months")
             else:
                 patience_counter += 1
                 
             if patience_counter >= patience:
-                print(f"Early stopping triggered after {patience} epochs without improvement")
+                print(f"⏹️ Early stopping triggered after {patience} epochs without improvement")
                 break
         
-        # Load best model
-        checkpoint = torch.load('best_bone_age_model.pth')
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        print(f"Loaded best model with MAE: {checkpoint['val_mae']:.2f} months")
+        # Find and load the best model (look for any best checkpoint in the directory)
+        best_checkpoints = [f for f in os.listdir(model_dir) if f.endswith('_best.pth')]
+        if best_checkpoints:
+            # Sort by epoch number and get the latest
+            best_checkpoints.sort(key=lambda x: int(x.split('_')[2]))
+            best_model_path = os.path.join(model_dir, best_checkpoints[-1])
+            # FIX: Add weights_only=False for PyTorch 2.6+ compatibility
+            checkpoint = torch.load(best_model_path, map_location=self.device, weights_only=False)
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+            print(f"🏆 Loaded best model from: {best_model_path}")
+            print(f"🎯 Best MAE: {checkpoint['val_mae']:.2f} months")
+        else:
+            print("⚠️ No best model checkpoint found, using current model state")
         
         return {
             'best_val_mae': best_val_mae,
             'train_losses': self.train_losses,
             'val_losses': self.val_losses,
-            'val_maes': self.val_maes
+            'val_maes': self.val_maes,
+            'model_dir': model_dir
+        }
+
+class MultiDatasetTrainer(BoneAgeTrainer):
+    """Extended trainer for multiple datasets with catastrophic forgetting prevention"""
+    
+    def __init__(self, model, device='cuda'):
+        super().__init__(model, device)
+        self.dataset_history = []  # Track which datasets have been used
+        
+    def create_combined_dataset(self, dataset_paths: List[str]) -> Tuple[List[str], List[float], List[int]]:
+        """Combine multiple CSV datasets into one"""
+        all_image_paths = []
+        all_ages = []
+        all_genders = []
+        
+        print("📊 Combining datasets...")
+        for i, csv_path in enumerate(dataset_paths):
+            if os.path.exists(csv_path):
+                print(f"  Loading dataset {i+1}: {csv_path}")
+                df = pd.read_csv(csv_path)
+                
+                image_paths = df.iloc[:, 0].tolist()
+                ages_months = df.iloc[:, 1].tolist()
+                genders = df.iloc[:, 2].tolist()
+                
+                all_image_paths.extend(image_paths)
+                all_ages.extend(ages_months)
+                all_genders.extend(genders)
+                
+                print(f"    Added {len(image_paths)} samples")
+                self.dataset_history.append(csv_path)
+            else:
+                print(f"⚠️ Dataset not found: {csv_path}")
+        
+        print(f"✅ Combined dataset: {len(all_image_paths)} total samples from {len(self.dataset_history)} datasets")
+        return all_image_paths, all_ages, all_genders
+    
+    def create_replay_dataset(self, new_csv: str, previous_csv: str, replay_ratio: float = 0.3):
+        """Create dataset that mixes new data with samples from previous dataset"""
+        
+        print(f"🔄 Creating replay dataset...")
+        
+        # Load new dataset
+        new_df = pd.read_csv(new_csv)
+        new_size = len(new_df)
+        print(f"  New dataset: {new_size} samples")
+        
+        # Load previous dataset
+        prev_df = pd.read_csv(previous_csv)
+        
+        # Sample from previous dataset for replay
+        replay_size = int(new_size * replay_ratio)
+        replay_samples = prev_df.sample(n=min(replay_size, len(prev_df)), random_state=42)
+        print(f"  Replay samples: {len(replay_samples)} samples ({replay_ratio*100:.1f}% of new data)")
+        
+        # Combine datasets
+        combined_df = pd.concat([new_df, replay_samples], ignore_index=True)
+        print(f"  Total training: {len(combined_df)} samples")
+        
+        return (combined_df.iloc[:, 0].tolist(),
+                combined_df.iloc[:, 1].tolist(), 
+                combined_df.iloc[:, 2].tolist())
+    
+    def calculate_fisher_information(self, dataloader):
+        """Calculate Fisher Information Matrix for EWC"""
+        print("🧠 Calculating Fisher Information Matrix...")
+        
+        fisher_dict = {}
+        optpar_dict = {}
+        
+        # Store current parameters
+        for name, param in self.model.named_parameters():
+            optpar_dict[name] = param.data.clone()
+            fisher_dict[name] = torch.zeros_like(param.data)
+        
+        self.model.eval()
+        criterion = nn.L1Loss()
+        
+        for batch in tqdm(dataloader, desc="Computing Fisher Information"):
+            images = batch['image'].to(self.device)
+            ages = batch['age_months'].to(self.device)
+            
+            self.model.zero_grad()
+            outputs = self.model(images)
+            loss = criterion(outputs['age'], ages)
+            loss.backward()
+            
+            for name, param in self.model.named_parameters():
+                if param.grad is not None:
+                    fisher_dict[name] += param.grad.data ** 2
+        
+        # Normalize by number of samples
+        for name in fisher_dict:
+            fisher_dict[name] /= len(dataloader.dataset)
+        
+        print("✅ Fisher Information Matrix calculated")
+        return fisher_dict, optpar_dict
+    
+    def train_epoch_with_ewc(self, train_loader, optimizer, criterion_age, criterion_gender,
+                            fisher_dict, optpar_dict, ewc_lambda):
+        """Training epoch with EWC regularization"""
+        self.model.train()
+        total_loss = 0
+        total_ewc_loss = 0
+        total_standard_loss = 0
+        
+        pbar = tqdm(train_loader, desc="Training with EWC")
+        for batch in pbar:
+            images = batch['image'].to(self.device)
+            ages = batch['age_months'].to(self.device)
+            genders = batch['gender'].to(self.device)
+            
+            optimizer.zero_grad()
+            outputs = self.model(images)
+            
+            # Standard losses
+            age_loss = criterion_age(outputs['age'], ages)
+            gender_loss = criterion_gender(outputs['gender'], genders)
+            standard_loss = age_loss + 0.3 * gender_loss
+            
+            # EWC regularization loss
+            ewc_loss = 0
+            if fisher_dict:
+                for name, param in self.model.named_parameters():
+                    if name in fisher_dict:
+                        ewc_loss += (fisher_dict[name] * 
+                                   (param - optpar_dict[name]) ** 2).sum()
+                ewc_loss *= ewc_lambda / 2
+            
+            # Total loss
+            total_loss_batch = standard_loss + ewc_loss
+            total_loss_batch.backward()
+            
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            optimizer.step()
+            
+            total_loss += total_loss_batch.item()
+            total_standard_loss += standard_loss.item()
+            total_ewc_loss += ewc_loss.item() if isinstance(ewc_loss, torch.Tensor) else ewc_loss
+            
+            pbar.set_postfix({
+                'Total': f'{total_loss_batch.item():.4f}',
+                'Standard': f'{standard_loss.item():.4f}',
+                'EWC': f'{ewc_loss.item() if isinstance(ewc_loss, torch.Tensor) else ewc_loss:.4f}'
+            })
+        
+        return {
+            'total_loss': total_loss / len(train_loader),
+            'standard_loss': total_standard_loss / len(train_loader),
+            'ewc_loss': total_ewc_loss / len(train_loader)
+        }
+    
+    def fit_with_ewc(self, train_loader, val_loader, previous_model_path=None, 
+                     ewc_lambda=1000, epochs=50, learning_rate=1e-4, model_name='bone_age_ewc'):
+        """Train with Elastic Weight Consolidation to prevent forgetting"""
+        
+        # Calculate Fisher Information Matrix if we have a previous model
+        fisher_dict = {}
+        optpar_dict = {}
+        
+        if previous_model_path and os.path.exists(previous_model_path):
+            print("📂 Loading previous model for EWC...")
+            
+            # Load previous model
+            # FIX: Add weights_only=False for PyTorch 2.6+ compatibility
+            prev_checkpoint = torch.load(previous_model_path, map_location=self.device, weights_only=False)
+            self.model.load_state_dict(prev_checkpoint['model_state_dict'])
+            
+            # Calculate Fisher Information Matrix using some samples from training data
+            fisher_dict, optpar_dict = self.calculate_fisher_information(train_loader)
+        
+        # Setup optimizer and criteria
+        optimizer = optim.AdamW(self.model.parameters(), lr=learning_rate)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+        criterion_age = nn.L1Loss()
+        criterion_gender = nn.BCELoss()
+        
+        best_val_mae = float('inf')
+        patience_counter = 0
+        
+        # Create model directory
+        model_dir = f'models/{model_name}'
+        os.makedirs(model_dir, exist_ok=True)
+        
+        print(f"🧠 Starting EWC training for {epochs} epochs...")
+        print(f"📁 EWC model checkpoints will be saved to: {model_dir}")
+        print(f"🔗 EWC Lambda: {ewc_lambda}")
+        
+        for epoch in range(epochs):
+            print(f"\nEpoch {epoch + 1}/{epochs}")
+            print("-" * 30)
+            
+            # Training with EWC regularization
+            train_metrics = self.train_epoch_with_ewc(
+                train_loader, optimizer, criterion_age, criterion_gender,
+                fisher_dict, optpar_dict, ewc_lambda
+            )
+            
+            # Validation (same as before)
+            val_metrics = self.validate(val_loader, criterion_age, criterion_gender)
+            scheduler.step(val_metrics['val_loss'])
+            
+            # Print metrics
+            print(f"Train Loss: {train_metrics['total_loss']:.4f}")
+            print(f"  Standard Loss: {train_metrics['standard_loss']:.4f}")
+            print(f"  EWC Loss: {train_metrics['ewc_loss']:.4f}")
+            print(f"Val MAE: {val_metrics['age_mae']:.2f} months")
+            print(f"Val R²: {val_metrics['age_r2']:.4f}")
+            print(f"Current LR: {optimizer.param_groups[0]['lr']:.6f}")
+            
+            # Save checkpoint
+            checkpoint_path = f'{model_dir}/ewc_checkpoint_epoch_{epoch+1}.pth'
+            is_best = val_metrics['age_mae'] < best_val_mae
+            
+            checkpoint = {
+                'model_state_dict': self.model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'epoch': epoch,
+                'val_mae': val_metrics['age_mae'],
+                'fisher_dict': fisher_dict,
+                'optpar_dict': optpar_dict,
+                'ewc_lambda': ewc_lambda,
+                'train_metrics': train_metrics,
+                'val_metrics': val_metrics,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            torch.save(checkpoint, checkpoint_path)
+            
+            if is_best:
+                best_val_mae = val_metrics['age_mae']
+                patience_counter = 0
+                # Save best model
+                best_path = checkpoint_path.replace('.pth', '_best.pth')
+                shutil.copy2(checkpoint_path, best_path)
+                print(f"💾 New best EWC model saved! MAE: {best_val_mae:.2f}")
+            else:
+                patience_counter += 1
+                
+            if patience_counter >= 10:
+                print("⏹️ Early stopping triggered")
+                break
+        
+        return {
+            'best_val_mae': best_val_mae,
+            'model_dir': model_dir,
+            'fisher_dict': fisher_dict,
+            'optpar_dict': optpar_dict
         }
 
 class BoneAgePredictor:
@@ -370,11 +699,18 @@ class BoneAgePredictor:
     def load_model(self, model_path: str):
         """Load trained model"""
         self.model = BoneAgeModel()
-        checkpoint = torch.load(model_path, map_location=self.device)
+        # FIX: Add weights_only=False for PyTorch 2.6+ compatibility
+        checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.model.to(self.device)
         self.model.eval()
-        print(f"Model loaded from {model_path}")
+        print(f"📂 Model loaded from {model_path}")
+        
+        # Print model info if available
+        if 'timestamp' in checkpoint:
+            print(f"   Trained on: {checkpoint['timestamp']}")
+        if 'val_mae' in checkpoint:
+            print(f"   Best validation MAE: {checkpoint['val_mae']:.2f} months")
     
     def predict_single_image(self, image_path: str, monte_carlo_samples=10) -> BoneAgeResult:
         """Predict bone age for a single image with uncertainty estimation"""
@@ -434,7 +770,7 @@ class BoneAgePredictor:
                 result = self.predict_single_image(image_path)
                 results.append(result)
             except Exception as e:
-                print(f"Error processing {image_path}: {e}")
+                print(f"❌ Error processing {image_path}: {e}")
                 results.append(None)
         return results
 
@@ -461,47 +797,52 @@ def create_demo_dataset(csv_path: str = None) -> Tuple[List[str], List[float], L
         # Return empty lists for demo
         return [], [], []
 
-def plot_training_history(train_losses: List[float], val_losses: List[float], val_maes: List[float]):
+def plot_training_history(train_losses: List[float], val_losses: List[float], val_maes: List[float], save_path: str = None):
     """Plot training history"""
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
     
     # Loss plot
-    ax1.plot(train_losses, label='Training Loss')
-    ax1.plot(val_losses, label='Validation Loss')
+    ax1.plot(train_losses, label='Training Loss', color='blue')
+    ax1.plot(val_losses, label='Validation Loss', color='red')
     ax1.set_xlabel('Epoch')
     ax1.set_ylabel('Loss')
     ax1.set_title('Training and Validation Loss')
     ax1.legend()
-    ax1.grid(True)
+    ax1.grid(True, alpha=0.3)
     
     # MAE plot
-    ax2.plot(val_maes, label='Validation MAE', color='orange')
+    ax2.plot(val_maes, label='Validation MAE', color='orange', linewidth=2)
     ax2.set_xlabel('Epoch')
     ax2.set_ylabel('MAE (months)')
     ax2.set_title('Validation Mean Absolute Error')
     ax2.legend()
-    ax2.grid(True)
+    ax2.grid(True, alpha=0.3)
     
     plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"📊 Training history saved to {save_path}")
+    
     plt.show()
 
 def evaluate_model(predictor: BoneAgePredictor, test_image_paths: List[str], 
                   test_ages: List[float]) -> Dict:
     """Evaluate model performance"""
-    print("Evaluating model performance...")
+    print("📊 Evaluating model performance...")
     
     predictions = []
     uncertainties = []
     confidences = []
     
-    for image_path in tqdm(test_image_paths):
+    for image_path in tqdm(test_image_paths, desc="Evaluating"):
         try:
             result = predictor.predict_single_image(image_path)
             predictions.append(result.predicted_age_months)
             uncertainties.append(result.uncertainty)
             confidences.append(result.confidence)
         except Exception as e:
-            print(f"Error predicting {image_path}: {e}")
+            print(f"❌ Error predicting {image_path}: {e}")
             predictions.append(np.nan)
             uncertainties.append(np.nan)
             confidences.append(np.nan)
@@ -518,14 +859,18 @@ def evaluate_model(predictor: BoneAgePredictor, test_image_paths: List[str],
     r2 = r2_score(test_ages, predictions)
     rmse = np.sqrt(np.mean((predictions - test_ages)**2))
     
-    # Clinical accuracy (within 1 year)
+    # Clinical accuracy (within different thresholds)
+    within_6_months = np.mean(np.abs(predictions - test_ages) <= 6) * 100
     within_12_months = np.mean(np.abs(predictions - test_ages) <= 12) * 100
+    within_24_months = np.mean(np.abs(predictions - test_ages) <= 24) * 100
     
     results = {
         'mae': mae,
         'rmse': rmse,
         'r2': r2,
+        'within_6_months': within_6_months,
         'within_12_months': within_12_months,
+        'within_24_months': within_24_months,
         'mean_uncertainty': np.mean(uncertainties),
         'mean_confidence': np.mean(confidences),
         'predictions': predictions,
@@ -533,44 +878,246 @@ def evaluate_model(predictor: BoneAgePredictor, test_image_paths: List[str],
         'uncertainties': uncertainties
     }
     
-    print(f"Test Results:")
+    print(f"📈 Test Results:")
     print(f"  MAE: {mae:.2f} months")
     print(f"  RMSE: {rmse:.2f} months")
     print(f"  R²: {r2:.4f}")
+    print(f"  Accuracy (±6 months): {within_6_months:.1f}%")
     print(f"  Accuracy (±12 months): {within_12_months:.1f}%")
+    print(f"  Accuracy (±24 months): {within_24_months:.1f}%")
     print(f"  Mean uncertainty: {np.mean(uncertainties):.2f} months")
     print(f"  Mean confidence: {np.mean(confidences):.3f}")
     
     return results
 
-def main():
-    """Main training and evaluation pipeline"""
+# Multi-dataset training strategies
+def train_multiple_datasets_strategy1_combined(dataset_csvs: List[str], config: Dict):
+    """Strategy 1: Combine all datasets and train once"""
+    print("🔄 Strategy 1: Combined Dataset Training")
     
-    # Configuration
+    trainer = MultiDatasetTrainer(BoneAgeModel(backbone=config['backbone']))
+    
+    # Combine all datasets
+    all_paths, all_ages, all_genders = trainer.create_combined_dataset(dataset_csvs)
+    
+    if not all_paths:
+        print("❌ No datasets loaded")
+        return None
+    
+    # Split combined dataset
+    train_paths, test_paths, train_ages, test_ages, train_genders, test_genders = train_test_split(
+        all_paths, all_ages, all_genders, test_size=0.2, random_state=42
+    )
+    
+    train_paths, val_paths, train_ages, val_ages, train_genders, val_genders = train_test_split(
+        train_paths, train_ages, train_genders, test_size=0.2, random_state=42
+    )
+    
+    print(f"📊 Combined Dataset Split:")
+    print(f"  Training: {len(train_paths)} images")
+    print(f"  Validation: {len(val_paths)} images")
+    print(f"  Test: {len(test_paths)} images")
+    
+    # Create dataloaders
+    train_dataset = BoneAgeDataset(train_paths, train_ages, train_genders, is_training=True)
+    val_dataset = BoneAgeDataset(val_paths, val_ages, val_genders, is_training=False)
+    
+    train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True, num_workers=4)
+    val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False, num_workers=4)
+    
+    # Train on combined dataset
+    results = trainer.fit(
+        train_loader, val_loader, 
+        epochs=config['epochs'],
+        learning_rate=config['learning_rate'],
+        model_name='combined_dataset_model'
+    )
+    
+    # Plot training history
+    plot_path = f"{results['model_dir']}/training_history.png"
+    plot_training_history(results['train_losses'], results['val_losses'], results['val_maes'], plot_path)
+    
+    print("✅ Combined model training completed!")
+    return results
+
+def train_multiple_datasets_strategy2_sequential(dataset_csvs: List[str], config: Dict, replay_ratio: float = 0.3):
+    """Strategy 2: Sequential training with experience replay"""
+    print("🔄 Strategy 2: Sequential Training with Experience Replay")
+    
+    trainer = MultiDatasetTrainer(BoneAgeModel(backbone=config['backbone']))
+    results_history = []
+    
+    for i, csv_path in enumerate(dataset_csvs):
+        print(f"\n📚 Training on Dataset {i+1}: {os.path.basename(csv_path)}")
+        
+        if i == 0:
+            # First dataset - normal training
+            paths, ages, genders = create_demo_dataset(csv_path)
+        else:
+            # Subsequent datasets - use replay
+            paths, ages, genders = trainer.create_replay_dataset(
+                csv_path, dataset_csvs[i-1], replay_ratio
+            )
+        
+        if not paths:
+            print(f"⚠️ Skipping {csv_path} - no data loaded")
+            continue
+        
+        # Split dataset
+        train_paths, val_paths, train_ages, val_ages, train_genders, val_genders = train_test_split(
+            paths, ages, genders, test_size=0.2, random_state=42
+        )
+        
+        print(f"  Training: {len(train_paths)}, Validation: {len(val_paths)} samples")
+        
+        # Create dataloaders
+        train_dataset = BoneAgeDataset(train_paths, train_ages, train_genders, is_training=True)
+        val_dataset = BoneAgeDataset(val_paths, val_ages, val_genders, is_training=False)
+        
+        train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True, num_workers=4)
+        val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False, num_workers=4)
+        
+        # Resume from previous model if not first dataset
+        resume_from = None
+        if i > 0 and results_history:
+            last_model_dir = results_history[-1]['model_dir']
+            # Find the best checkpoint from previous training
+            best_checkpoints = [f for f in os.listdir(last_model_dir) if f.endswith('_best.pth')]
+            if best_checkpoints:
+                resume_from = os.path.join(last_model_dir, best_checkpoints[0])
+        
+        model_name = f'sequential_dataset_{i+1}_replay'
+        results = trainer.fit(
+            train_loader, val_loader, 
+            epochs=config['epochs']//2,  # Fewer epochs for sequential training
+            learning_rate=config['learning_rate'] * 0.5,  # Lower learning rate for fine-tuning
+            resume_from=resume_from,
+            model_name=model_name
+        )
+        
+        results['dataset_name'] = os.path.basename(csv_path)
+        results_history.append(results)
+        
+        print(f"✅ Dataset {i+1} training completed. Best MAE: {results['best_val_mae']:.2f}")
+    
+    print("🎉 Sequential training with replay completed!")
+    return results_history
+
+def train_multiple_datasets_strategy3_ewc(dataset_csvs: List[str], config: Dict, ewc_lambda: float = 1000):
+    """Strategy 3: Sequential training with Elastic Weight Consolidation"""
+    print("🔄 Strategy 3: Sequential Training with EWC")
+    
+    trainer = MultiDatasetTrainer(BoneAgeModel(backbone=config['backbone']))
+    results_history = []
+    
+    for i, csv_path in enumerate(dataset_csvs):
+        print(f"\n🧠 Training on Dataset {i+1} with EWC: {os.path.basename(csv_path)}")
+        
+        paths, ages, genders = create_demo_dataset(csv_path)
+        
+        if not paths:
+            print(f"⚠️ Skipping {csv_path} - no data loaded")
+            continue
+        
+        # Split dataset
+        train_paths, val_paths, train_ages, val_ages, train_genders, val_genders = train_test_split(
+            paths, ages, genders, test_size=0.2, random_state=42
+        )
+        
+        # Create dataloaders
+        train_dataset = BoneAgeDataset(train_paths, train_ages, train_genders, is_training=True)
+        val_dataset = BoneAgeDataset(val_paths, val_ages, val_genders, is_training=False)
+        
+        train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True, num_workers=4)
+        val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False, num_workers=4)
+        
+        # Use EWC if not first dataset
+        previous_model = None
+        if i > 0 and results_history:
+            last_model_dir = results_history[-1]['model_dir']
+            # Find the best EWC checkpoint from previous training
+            best_checkpoints = [f for f in os.listdir(last_model_dir) if f.endswith('_best.pth')]
+            if best_checkpoints:
+                previous_model = os.path.join(last_model_dir, best_checkpoints[0])
+        
+        model_name = f'ewc_dataset_{i+1}'
+        results = trainer.fit_with_ewc(
+            train_loader, val_loader, 
+            previous_model_path=previous_model,
+            ewc_lambda=ewc_lambda,
+            epochs=config['epochs']//2,
+            learning_rate=config['learning_rate'] * 0.5,
+            model_name=model_name
+        )
+        
+        results['dataset_name'] = os.path.basename(csv_path)
+        results_history.append(results)
+        
+        print(f"✅ EWC Dataset {i+1} completed. Best MAE: {results['best_val_mae']:.2f}")
+    
+    print("🎉 Sequential training with EWC completed!")
+    return results_history
+
+def main():
+    """Main training and evaluation pipeline - with CSV file selection"""
+    
+    # Get CSV file from user
+    print("📄 Enter the training CSV file path:")
+    print("   (Type the path)")
+    csv_file = input("CSV file: ").strip()
+    
+    # Remove quotes if file was drag-and-dropped
+    csv_file = csv_file.strip('"').strip("'")
+    
+    # Default to bone_age_dataset.csv if nothing entered
+    if not csv_file:
+        csv_file = "bone_age_dataset.csv"
+        print(f"📄 Using default: {csv_file}")
+    
+    # Validate file exists
+    if not os.path.exists(csv_file):
+        print(f"❌ File not found: {csv_file}")
+        print("Please check the file path and try again.")
+        return
+    
+    # Configuration - simplified with auto-resume
     config = {
-        'data_csv': 'bone_age_dataset.csv',  # Path to your dataset CSV
+        'data_csv': csv_file,  # User-specified CSV file
         'batch_size': 16,
         'epochs': 50,
         'learning_rate': 1e-4,
-        'backbone': 'efficientnet_b3',  # or 'resnet50', 'densenet121'
-        'device': 'cuda' if torch.cuda.is_available() else 'cpu'
+        'backbone': 'efficientnet_b3',
+        'device': 'cuda' if torch.cuda.is_available() else 'cpu',
+        'resume_from': 'best_bone_age_model.pth' if os.path.exists('best_bone_age_model.pth') else None,
+        'start_fresh': False
     }
     
-    print(f"Using device: {config['device']}")
+    print(f"🖥️ Using device: {config['device']}")
+    print(f"📄 Training data: {csv_file}")
+    
+    # Check for existing model
+    if config['resume_from']:
+        print(f"🔍 Found existing model: {config['resume_from']}")
+        print("📚 Will continue training from checkpoint")
+    else:
+        print("🆕 No existing model found, starting fresh training")
     
     # Load dataset
     image_paths, ages_months, genders = create_demo_dataset(config['data_csv'])
     
     if not image_paths:
-        print("❌ No dataset loaded. Please provide a valid CSV file with bone age data.")
-        print("\nFor demo purposes, here's how to use the trained model:")
+        print(f"❌ No dataset loaded from: {csv_file}")
+        print("Please ensure the CSV file has the correct format:")
+        print("  Column 1: image_path")
+        print("  Column 2: boneage (in months)")
+        print("  Column 3: gender (0=female, 1=male)")
+        print("\nExample usage after training:")
         print("""
-# After training, use the model like this:
+# Load trained model for inference:
 predictor = BoneAgePredictor('best_bone_age_model.pth')
 result = predictor.predict_single_image('path/to/xray.jpg')
 print(f"Predicted age: {result.predicted_age_months:.1f} months")
 print(f"Confidence: {result.confidence:.3f}")
-print(f"Age range: {result.age_range_min:.1f} - {result.age_range_max:.1f} months")
         """)
         return
     
@@ -583,7 +1130,7 @@ print(f"Age range: {result.age_range_min:.1f} - {result.age_range_max:.1f} month
         train_paths, train_ages, train_genders, test_size=0.2, random_state=42, stratify=train_genders
     )
     
-    print(f"Dataset split:")
+    print(f"📊 Dataset split:")
     print(f"  Training: {len(train_paths)} images")
     print(f"  Validation: {len(val_paths)} images")
     print(f"  Test: {len(test_paths)} images")
@@ -591,48 +1138,70 @@ print(f"Age range: {result.age_range_min:.1f} - {result.age_range_max:.1f} month
     # Create datasets and dataloaders
     train_dataset = BoneAgeDataset(train_paths, train_ages, train_genders, is_training=True)
     val_dataset = BoneAgeDataset(val_paths, val_ages, val_genders, is_training=False)
-    test_dataset = BoneAgeDataset(test_paths, test_ages, test_genders, is_training=False)
     
     train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True, num_workers=4)
     val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False, num_workers=4)
-    test_loader = DataLoader(test_dataset, batch_size=config['batch_size'], shuffle=False, num_workers=4)
     
     # Create model
     model = BoneAgeModel(backbone=config['backbone'])
     trainer = BoneAgeTrainer(model, device=config['device'])
     
-    # Train model
+    # Train model with auto-resume
     training_results = trainer.fit(
         train_loader, 
         val_loader, 
         epochs=config['epochs'],
-        learning_rate=config['learning_rate']
+        learning_rate=config['learning_rate'],
+        resume_from=config['resume_from'],
+        model_name='bone_age_model'
     )
     
     # Plot training history
+    plot_path = f"{training_results['model_dir']}/training_history.png"
     plot_training_history(
         training_results['train_losses'],
         training_results['val_losses'],
-        training_results['val_maes']
+        training_results['val_maes'],
+        plot_path
     )
     
-    # Evaluate on test set
-    predictor = BoneAgePredictor('best_bone_age_model.pth', device=config['device'])
-    test_results = evaluate_model(predictor, test_paths, test_ages)
-    
-    # Save results
-    results_summary = {
-        'config': config,
-        'training_results': training_results,
-        'test_results': {k: v for k, v in test_results.items() if k not in ['predictions', 'targets', 'uncertainties']}
-    }
-    
-    with open('training_results.json', 'w') as f:
-        json.dump(results_summary, f, indent=2)
-    
-    print("\n✅ Training completed! Model saved as 'best_bone_age_model.pth'")
-    print("📊 Results saved to 'training_results.json'")
+    # Find best model checkpoint
+    model_dir = training_results['model_dir']
+    best_checkpoints = [f for f in os.listdir(model_dir) if f.endswith('_best.pth')]
+    if best_checkpoints:
+        best_model_path = os.path.join(model_dir, best_checkpoints[0])
+        
+        # Evaluate on test set
+        predictor = BoneAgePredictor(best_model_path, device=config['device'])
+        test_results = evaluate_model(predictor, test_paths, test_ages)
+        
+        # Save comprehensive results
+        results_summary = {
+            'config': config,
+            'training_results': {k: v for k, v in training_results.items() if k != 'model_dir'},
+            'test_results': {k: v for k, v in test_results.items() if k not in ['predictions', 'targets', 'uncertainties']},
+            'model_path': best_model_path,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        results_path = f"{model_dir}/complete_results.json"
+        with open(results_path, 'w') as f:
+            json.dump(results_summary, f, indent=2)
+        
+        print(f"\n✅ Training completed!")
+        print(f"🏆 Best model saved as: best_bone_age_model.pth")
+        print(f"📊 Detailed results: {results_path}")
+        print(f"📈 Training plots: {plot_path}")
+        print(f"🎯 Best validation MAE: {training_results['best_val_mae']:.2f} months")
+    else:
+        print("⚠️ No best model checkpoint found")
 
 if __name__ == "__main__":
-    main()
+    print("🦴 Bone Age Prediction System")
+    print("="*40)
+    print("🚀 Interactive training with CSV file selection")
+    print("🔍 Auto-resume from: best_bone_age_model.pth (if exists)")
+    print("📂 Default CSV: bone_age_dataset.csv (if no input)")
+    print()
     
+    main()
