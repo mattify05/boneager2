@@ -43,13 +43,21 @@ def display():
             st.image(image, caption="DICOM Image Preview", use_container_width=True)
 
         else:
-            image = Image.open(uploaded_file)
-            st.image(image, caption="Image Preview", use_container_width=True)
-            image = np.array(image)  # convert for processing
+            col1, col2, col3 = st.columns([2, 3, 2])
+            with col1:
+                image = Image.open(uploaded_file)
+                st.image(image, caption="Image Preview", use_container_width=True)
+                image = np.array(image)  # convert for processing
+        
+        with col3:
+            patient_name = st.session_state.get("patient_name", "Unknown")
+            st.success(f"Patient Name: {patient_name}")
 
-        # Bone age estimation (placeholder)
-        bone_age = estimate_bone_age(image)
-        st.success(f"Estimated Bone Age: {bone_age} years")
+            patient_id = st.session_state.get("patient_id", "N/A")
+            st.success(f"Patient ID: {patient_id}")
+
+            bone_age = estimate_bone_age(image)
+            st.success(f"Estimated Bone Age: {bone_age} years")
 
     # converts the data to csv for download and implements the download button 
     df = get_data()

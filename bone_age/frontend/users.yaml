@@ -9,6 +9,8 @@ users:
     password: 95a8f6568fa7ad6aba1bdcd6620a471a0aca7d4c447f508a94ae4aab2ed86bd3
   mei test:
     password: cf80cd8aed482d5d1527d7dc72fceff84e6326592848447d2dc0b0e87dfc9a90
+  new:
+    password: 11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437
   pa:
     password: 9513229d435978263d82902c59d4e0fb86c941a9bf09b605cd8a6643f40149a8
   snoopy snoop:
