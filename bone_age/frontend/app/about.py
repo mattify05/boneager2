@@ -32,7 +32,7 @@ def render_about():
     estimating the uncertainty levels.
     """)
 
-    st.write("""The figure below illustrates the model's performance eover 50 epochs
+    st.write("""The figure below illustrates the model's performance over 50 epochs
     using loss and mean absolute error (MAE). These results highlight the effectiveness
     of thorough training, clean data and hyperparameter tuning, supporting our choice
     of regression for bone age estimation. Future work will focus on subgroup analysis
