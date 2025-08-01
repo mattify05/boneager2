@@ -1,343 +1,434 @@
+#!/usr/bin/env python3
+"""
+🦴 Complete Resumable Bone Age Training System
+=============================================
+
+Features:
+- ✅ Automatic checkpoint saving after every epoch
+- ✅ Resume training from any point
+- ✅ Safe interruption with Ctrl+C
+- ✅ Optimized for laptop training (CPU + 16GB RAM)
+- ✅ Progress tracking and history preservation
+- ✅ Best model auto-saving
+- ✅ Memory efficient processing
+
+Usage:
+    # Start new training
+    python bone_age_training.py --csv dataset.csv
+    
+    # Resume training
+    python bone_age_training.py --resume --csv dataset.csv
+    
+    # Check progress
+    python bone_age_training.py --status
+"""
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-import torchvision.transforms as transforms
 import torchvision.models as models
 import cv2
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import os
-from PIL import Image
+import glob
+import argparse
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, r2_score
-import warnings
-from typing import Tuple, Dict, List, Optional
-from dataclasses import dataclass
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
-import json
 from tqdm import tqdm
-import shutil
-from datetime import datetime
-import hashlib
-import random
-from collections import defaultdict
 import gc
-
+import psutil
+import time
+import json
+from datetime import datetime, timedelta
+import warnings
+import shutil
 warnings.filterwarnings('ignore')
 
-@dataclass
-class TrainingSession:
-    """Track training sessions and used images"""
-    session_id: str
-    used_images: List[str]
-    epoch_start: int
-    epoch_end: int
-    best_mae: float
-    timestamp: str
-    stage: str
+# ============================================================================
+# CHECKPOINT MANAGEMENT SYSTEM
+# ============================================================================
 
-class SessionManager:
-    """Manages training sessions to avoid image repetition"""
+class CheckpointManager:
+    """Advanced checkpoint management for resumable training"""
     
-    def __init__(self, session_file: str = "training_sessions.json"):
-        self.session_file = session_file
-        self.sessions = []
-        self.load_sessions()
+    def __init__(self, checkpoint_dir="checkpoints", project_name="bone_age"):
+        self.checkpoint_dir = checkpoint_dir
+        self.project_name = project_name
+        self.project_dir = os.path.join(checkpoint_dir, project_name)
+        os.makedirs(self.project_dir, exist_ok=True)
+        
+        # Files
+        self.config_file = os.path.join(self.project_dir, "training_config.json")
+        self.progress_file = os.path.join(self.project_dir, "training_progress.json")
+        self.best_model_file = os.path.join(self.project_dir, "best_model.pth")
+        self.latest_checkpoint_file = os.path.join(self.project_dir, "latest_checkpoint.pth")
+        
+    def save_config(self, config):
+        """Save training configuration"""
+        config_copy = config.copy()
+        # Convert any non-serializable objects to strings
+        for key, value in config_copy.items():
+            if not isinstance(value, (str, int, float, bool, list, dict, type(None))):
+                config_copy[key] = str(value)
+        
+        with open(self.config_file, 'w') as f:
+            json.dump(config_copy, f, indent=2)
+        print(f"💾 Config saved to: {self.config_file}")
     
-    def load_sessions(self):
-        """Load previous training sessions"""
-        if os.path.exists(self.session_file):
-            try:
-                with open(self.session_file, 'r') as f:
-                    data = json.load(f)
-                    self.sessions = [TrainingSession(**session) for session in data]
-                print(f"📚 Loaded {len(self.sessions)} previous training sessions")
-            except Exception as e:
-                print(f"⚠️ Error loading sessions: {e}")
-                self.sessions = []
-        else:
-            print("🆕 No previous sessions found, starting fresh")
+    def load_config(self):
+        """Load training configuration"""
+        if os.path.exists(self.config_file):
+            with open(self.config_file, 'r') as f:
+                return json.load(f)
+        return None
     
-    def save_sessions(self):
-        """Save training sessions"""
-        data = [
-            {
-                'session_id': s.session_id,
-                'used_images': s.used_images,
-                'epoch_start': s.epoch_start,
-                'epoch_end': s.epoch_end,
-                'best_mae': s.best_mae,
-                'timestamp': s.timestamp,
-                'stage': s.stage
+    def save_checkpoint(self, model, optimizer, scheduler, epoch, val_mae, 
+                       train_loss, val_loss, history, total_training_time=0, is_best=False):
+        """Save complete training checkpoint"""
+        
+        checkpoint_data = {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+            'val_mae': val_mae,
+            'train_loss': train_loss,
+            'val_loss': val_loss,
+            'history': history,
+            'total_training_time': total_training_time,
+            'timestamp': datetime.now().isoformat(),
+            'is_best': is_best
+        }
+        
+        # Save regular checkpoint
+        checkpoint_file = os.path.join(self.project_dir, f"checkpoint_epoch_{epoch:03d}.pth")
+        torch.save(checkpoint_data, checkpoint_file)
+        
+        # Save latest checkpoint (for easy resuming)
+        torch.save(checkpoint_data, self.latest_checkpoint_file)
+        
+        # Save best model separately (lightweight)
+        if is_best:
+            best_model_data = {
+                'model_state_dict': model.state_dict(),
+                'val_mae': val_mae,
+                'epoch': epoch,
+                'timestamp': datetime.now().isoformat(),
+                'total_training_time': total_training_time
             }
-            for s in self.sessions
-        ]
-        with open(self.session_file, 'w') as f:
-            json.dump(data, f, indent=2)
-    
-    def get_used_images(self) -> set:
-        """Get all previously used images"""
-        used = set()
-        for session in self.sessions:
-            used.update(session.used_images)
-        return used
-    
-    def get_available_images(self, all_images: List[str], stage: str = None) -> List[str]:
-        """Get images that haven't been used yet"""
-        used = self.get_used_images()
-        available = [img for img in all_images if img not in used]
+            torch.save(best_model_data, self.best_model_file)
+            print(f"🏆 New best model saved! MAE: {val_mae:.2f} months")
         
-        print(f"📊 Image usage:")
-        print(f"  Total images: {len(all_images)}")
-        print(f"  Previously used: {len(used)}")
-        print(f"  Available for training: {len(available)}")
+        # Save progress info
+        progress = {
+            'current_epoch': epoch,
+            'best_mae': val_mae if is_best else getattr(self, 'current_best_mae', float('inf')),
+            'total_epochs_trained': epoch,
+            'last_checkpoint': checkpoint_file,
+            'total_training_time': total_training_time,
+            'training_start_time': getattr(self, 'training_start_time', datetime.now().isoformat()),
+            'last_update': datetime.now().isoformat(),
+            'status': 'training'
+        }
         
-        return available
-    
-    def add_session(self, session: TrainingSession):
-        """Add a new training session"""
-        self.sessions.append(session)
-        self.save_sessions()
-    
-    def get_next_stage(self) -> str:
-        """Determine the next training stage"""
-        if not self.sessions:
-            return "foundation"
+        # Update best MAE if this is the best
+        if is_best:
+            self.current_best_mae = val_mae
+            progress['best_mae'] = val_mae
         
-        stages = [s.stage for s in self.sessions]
-        if "foundation" not in stages:
-            return "foundation"
-        elif "intermediate" not in stages:
-            return "intermediate"
-        elif "advanced" not in stages:
-            return "advanced"
+        with open(self.progress_file, 'w') as f:
+            json.dump(progress, f, indent=2)
+        
+        print(f"💾 Checkpoint saved: epoch {epoch}, MAE: {val_mae:.2f}")
+        
+        # Clean up old checkpoints (keep last 5)
+        self._cleanup_old_checkpoints(keep_last=5)
+        
+        return checkpoint_file
+    
+    def _cleanup_old_checkpoints(self, keep_last=5):
+        """Keep only the last N checkpoints to save disk space"""
+        checkpoints = glob.glob(os.path.join(self.project_dir, "checkpoint_epoch_*.pth"))
+        if len(checkpoints) > keep_last:
+            # Sort by epoch number
+            checkpoints.sort(key=lambda x: int(x.split('_')[-1].split('.')[0]))
+            # Remove oldest checkpoints
+            for checkpoint in checkpoints[:-keep_last]:
+                try:
+                    os.remove(checkpoint)
+                except:
+                    pass
+    
+    def find_latest_checkpoint(self):
+        """Find the most recent checkpoint to resume from"""
+        if os.path.exists(self.latest_checkpoint_file):
+            return self.latest_checkpoint_file
+        
+        # Fallback: find highest epoch checkpoint
+        checkpoints = glob.glob(os.path.join(self.project_dir, "checkpoint_epoch_*.pth"))
+        if checkpoints:
+            checkpoints.sort(key=lambda x: int(x.split('_')[-1].split('.')[0]))
+            return checkpoints[-1]
+        
+        return None
+    
+    def load_checkpoint(self, checkpoint_path, model, optimizer, scheduler=None):
+        """Load checkpoint and restore training state"""
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+        
+        print(f"📂 Loading checkpoint: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+        
+        # Restore model state
+        model.load_state_dict(checkpoint['model_state_dict'])
+        
+        # Restore optimizer state
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        
+        # Restore scheduler state
+        if scheduler and checkpoint.get('scheduler_state_dict'):
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        
+        # Return training info
+        resume_info = {
+            'start_epoch': checkpoint['epoch'] + 1,  # Start from next epoch
+            'best_mae': checkpoint['val_mae'],
+            'history': checkpoint.get('history', {'train_loss': [], 'val_loss': [], 'val_mae': []}),
+            'last_train_loss': checkpoint.get('train_loss', 0),
+            'last_val_loss': checkpoint.get('val_loss', 0),
+            'total_training_time': checkpoint.get('total_training_time', 0)
+        }
+        
+        print(f"✅ Checkpoint loaded successfully!")
+        print(f"📊 Resuming from epoch {resume_info['start_epoch']}")
+        print(f"🎯 Previous best MAE: {resume_info['best_mae']:.2f} months")
+        
+        # Update our tracking
+        self.current_best_mae = checkpoint.get('val_mae', float('inf'))
+        self.training_start_time = checkpoint.get('timestamp', datetime.now().isoformat())
+        
+        return resume_info
+    
+    def get_training_progress(self):
+        """Get current training progress information"""
+        if os.path.exists(self.progress_file):
+            with open(self.progress_file, 'r') as f:
+                return json.load(f)
+        return None
+    
+    def should_resume(self):
+        """Check if there's a training session to resume"""
+        latest_checkpoint = self.find_latest_checkpoint()
+        progress = self.get_training_progress()
+        
+        if latest_checkpoint and progress:
+            print(f"\n🔍 Found existing training session:")
+            print(f"  📊 Last epoch: {progress.get('current_epoch', 'Unknown')}")
+            print(f"  🎯 Best MAE: {progress.get('best_mae', 'Unknown'):.2f} months")
+            
+            # Calculate training time
+            total_time = progress.get('total_training_time', 0)
+            if total_time > 0:
+                hours = int(total_time // 3600)
+                minutes = int((total_time % 3600) // 60)
+                print(f"  ⏱️  Training time: {hours}h {minutes}m")
+            
+            print(f"  📅 Last update: {progress.get('last_update', 'Unknown')[:19]}")
+            print(f"  💾 Checkpoint: {os.path.basename(latest_checkpoint)}")
+            
+            return True
+        return False
+    
+    def load_existing_model(self, model_path, model):
+        """Load weights from an existing model (like best_bone_age_model.pth)"""
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Existing model not found: {model_path}")
+        
+        print(f"📂 Loading existing model: {model_path}")
+        
+        # Load the existing model
+        checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
+        
+        # Try to extract model state dict
+        if 'model_state_dict' in checkpoint:
+            model_state = checkpoint['model_state_dict']
+            existing_mae = checkpoint.get('val_mae', 'Unknown')
+            existing_epoch = checkpoint.get('epoch', 'Unknown')
         else:
-            return "refinement"
-
-class CurriculumDataset(Dataset):
-    """Dataset with curriculum learning - easier samples first"""
-    
-    def __init__(self, image_paths: List[str], ages_months: List[float], 
-                 genders: List[int], transform=None, is_training=True, stage="foundation"):
-        self.image_paths = image_paths
-        self.ages_months = ages_months
-        self.genders = genders
-        self.transform = transform
-        self.is_training = is_training
-        self.stage = stage
+            # Assume the whole file is the state dict
+            model_state = checkpoint
+            existing_mae = 'Unknown'
+            existing_epoch = 'Unknown'
         
-        # Sort by curriculum difficulty
-        self._sort_by_curriculum()
-        
-        # Create augmentation pipeline based on stage
-        self._create_augmentations()
-    
-    def _sort_by_curriculum(self):
-        """Sort samples by training difficulty"""
-        print(f"📖 Applying curriculum learning for stage: {self.stage}")
-        
-        # Calculate difficulty based on age variance and extremes
-        difficulties = []
-        mean_age = np.mean(self.ages_months)
-        
-        for i, age in enumerate(self.ages_months):
-            # Difficulty factors:
-            # 1. Distance from mean age (extreme ages are harder)
-            age_difficulty = abs(age - mean_age) / mean_age
-            
-            # 2. Very young or very old are harder
-            extreme_difficulty = 0
-            if age < 24 or age > 180:  # < 2 years or > 15 years
-                extreme_difficulty = 0.5
-            
-            # 3. Add some randomness to avoid overfitting to difficulty metric
-            random_factor = np.random.random() * 0.1
-            
-            total_difficulty = age_difficulty + extreme_difficulty + random_factor
-            difficulties.append((total_difficulty, i))
-        
-        # Sort by difficulty
-        difficulties.sort(key=lambda x: x[0])
-        
-        # Reorder all arrays based on difficulty
-        sorted_indices = [idx for _, idx in difficulties]
-        self.image_paths = [self.image_paths[i] for i in sorted_indices]
-        self.ages_months = [self.ages_months[i] for i in sorted_indices]
-        self.genders = [self.genders[i] for i in sorted_indices]
-        
-        print(f"✅ Sorted {len(self.image_paths)} samples by curriculum difficulty")
-    
-    def _create_augmentations(self):
-        """Create augmentation pipeline based on training stage"""
-        if self.is_training:
-            if self.stage == "foundation":
-                # Gentle augmentations for foundation stage
-                self.aug_transform = A.Compose([
-                    A.Resize(384, 384),  # Smaller size for faster training
-                    A.Rotate(limit=10, p=0.3),
-                    A.RandomBrightnessContrast(brightness_limit=0.1, contrast_limit=0.1, p=0.3),
-                    A.HorizontalFlip(p=0.3),
-                    A.Normalize(mean=[0.485], std=[0.229]),
-                    ToTensorV2()
-                ])
-            elif self.stage == "intermediate":
-                # Moderate augmentations
-                self.aug_transform = A.Compose([
-                    A.Resize(448, 448),
-                    A.Rotate(limit=15, p=0.5),
-                    A.RandomBrightnessContrast(brightness_limit=0.15, contrast_limit=0.15, p=0.4),
-                    A.GaussianBlur(blur_limit=3, p=0.2),
-                    A.HorizontalFlip(p=0.5),
-                    A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.05, rotate_limit=5, p=0.3),
-                    A.Normalize(mean=[0.485], std=[0.229]),
-                    ToTensorV2()
-                ])
-            else:  # advanced/refinement
-                # Strong augmentations for final stages
-                self.aug_transform = A.Compose([
-                    A.Resize(512, 512),
-                    A.Rotate(limit=20, p=0.6),
-                    A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
-                    A.GaussianBlur(blur_limit=5, p=0.3),
-                    A.HorizontalFlip(p=0.5),
-                    A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1, rotate_limit=10, p=0.5),
-                    A.GridDistortion(p=0.2),
-                    A.ElasticTransform(p=0.2),
-                    A.Normalize(mean=[0.485], std=[0.229]),
-                    ToTensorV2()
-                ])
-        else:
-            # Validation - no augmentation, but size based on stage
-            size = 384 if self.stage == "foundation" else (448 if self.stage == "intermediate" else 512)
-            self.aug_transform = A.Compose([
-                A.Resize(size, size),
-                A.Normalize(mean=[0.485], std=[0.229]),
-                ToTensorV2()
-            ])
-    
-    def __len__(self):
-        return len(self.image_paths)
-    
-    def __getitem__(self, idx):
-        # Load image with error handling
-        image_path = self.image_paths[idx]
-        
+        # Load weights with flexibility for architecture differences
         try:
-            image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+            model.load_state_dict(model_state, strict=True)
+            print(f"✅ Loaded existing model weights perfectly!")
+        except RuntimeError as e:
+            print(f"⚠️  Model architecture mismatch. Trying flexible loading...")
+            # Load compatible weights only
+            model_dict = model.state_dict()
+            compatible_weights = {}
+            
+            for name, param in model_state.items():
+                if name in model_dict and model_dict[name].shape == param.shape:
+                    compatible_weights[name] = param
+                else:
+                    print(f"  ⚠️  Skipping incompatible layer: {name}")
+            
+            model_dict.update(compatible_weights)
+            model.load_state_dict(model_dict)
+            print(f"✅ Loaded {len(compatible_weights)}/{len(model_state)} compatible layers")
+        
+        print(f"📊 Existing model info:")
+        print(f"  🎯 Previous MAE: {existing_mae}")
+        print(f"  📅 Previous epoch: {existing_epoch}")
+        print(f"  🔄 Continuing training from this model...")
+        
+        return {
+            'previous_mae': existing_mae,
+            'previous_epoch': existing_epoch,
+            'loaded_successfully': True
+        }
+    
+    def mark_training_completed(self, final_mae, total_time):
+        """Mark training as completed"""
+        progress = self.get_training_progress() or {}
+        progress.update({
+            'status': 'completed',
+            'final_mae': final_mae,
+            'total_training_time': total_time,
+            'completion_time': datetime.now().isoformat()
+        })
+        
+        with open(self.progress_file, 'w') as f:
+            json.dump(progress, f, indent=2)
+
+# ============================================================================
+# PREPROCESSING SYSTEM
+# ============================================================================
+
+class LaptopOptimizedPreprocessor:
+    """Preprocessing optimized for laptop training - faster but still effective"""
+    
+    def __init__(self, image_size=384):
+        self.image_size = image_size
+        
+        # Training augmentations - optimized for speed
+        self.train_transform = A.Compose([
+            A.Resize(image_size, image_size, interpolation=cv2.INTER_LINEAR),
+            
+            # Essential augmentations for bone age
+            A.CLAHE(clip_limit=2.0, tile_grid_size=(4, 4), p=0.7),
+            A.Rotate(limit=15, border_mode=cv2.BORDER_CONSTANT, value=0, p=0.6),
+            A.HorizontalFlip(p=0.5),  # Hands can be mirrored
+            A.RandomBrightnessContrast(brightness_limit=0.15, contrast_limit=0.15, p=0.5),
+            
+            # Light geometric augmentations
+            A.ShiftScaleRotate(shift_limit=0.08, scale_limit=0.08, rotate_limit=8, p=0.4),
+            A.GaussianBlur(blur_limit=3, p=0.2),
+            
+            # Normalization
+            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ToTensorV2()
+        ])
+        
+        # Validation transform (no augmentation)
+        self.val_transform = A.Compose([
+            A.Resize(image_size, image_size, interpolation=cv2.INTER_LINEAR),
+            A.CLAHE(clip_limit=2.0, tile_grid_size=(4, 4), p=1.0),
+            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ToTensorV2()
+        ])
+    
+    def preprocess_image(self, image_path: str, is_training: bool = True):
+        """Fast preprocessing for laptop training"""
+        try:
+            # Load image efficiently
+            image = cv2.imread(image_path, cv2.IMREAD_COLOR)
             if image is None:
                 raise ValueError(f"Could not load image: {image_path}")
             
-            # Convert to 3-channel for pretrained models
-            image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+            # Convert BGR to RGB
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             
-            # Apply augmentations
-            if self.aug_transform:
-                augmented = self.aug_transform(image=image)
-                image = augmented['image']
+            # Apply transforms
+            if is_training:
+                transformed = self.train_transform(image=image)
+            else:
+                transformed = self.val_transform(image=image)
             
-            # Get labels
-            age_months = torch.tensor(self.ages_months[idx], dtype=torch.float32)
-            gender = torch.tensor(self.genders[idx], dtype=torch.float32)
-            
-            return {
-                'image': image,
-                'age_months': age_months,
-                'gender': gender,
-                'image_path': image_path
-            }
+            return transformed['image']
         
         except Exception as e:
-            print(f"❌ Error loading {image_path}: {e}")
-            # Return a dummy sample to prevent crashes
-            dummy_image = torch.zeros((3, 384, 384))
-            return {
-                'image': dummy_image,
-                'age_months': torch.tensor(120.0, dtype=torch.float32),  # 10 years
-                'gender': torch.tensor(0.0, dtype=torch.float32),
-                'image_path': image_path
-            }
+            print(f"❌ Error processing {image_path}: {e}")
+            # Return dummy image to prevent crashes
+            return torch.zeros((3, self.image_size, self.image_size))
 
-class ImprovedBoneAgeModel(nn.Module):
-    """Enhanced model with better architecture and techniques"""
+# ============================================================================
+# MODEL ARCHITECTURE
+# ============================================================================
+
+class LightweightBoneAgeModel(nn.Module):
+    """Laptop-friendly model - faster training, still accurate"""
     
-    def __init__(self, backbone='efficientnet_b3', pretrained=True, dropout=0.3, stage="foundation"):
-        super(ImprovedBoneAgeModel, self).__init__()
+    def __init__(self, backbone='efficientnet_b0', pretrained=True, dropout=0.3):
+        super(LightweightBoneAgeModel, self).__init__()
         
-        self.stage = stage
-        
-        # Load backbone with different configurations per stage
-        if backbone == 'efficientnet_b3':
-            from torchvision.models import efficientnet_b3
-            self.backbone = efficientnet_b3(pretrained=pretrained)
+        # Use smaller, faster backbone for laptop training
+        if backbone == 'efficientnet_b0':
+            self.backbone = models.efficientnet_b0(pretrained=pretrained)
             feature_dim = self.backbone.classifier[1].in_features
             self.backbone.classifier = nn.Identity()
-        elif backbone == 'efficientnet_b0':  # Lighter for foundation
-            from torchvision.models import efficientnet_b0
-            self.backbone = efficientnet_b0(pretrained=pretrained)
-            feature_dim = self.backbone.classifier[1].in_features
+        elif backbone == 'mobilenet_v3_large':
+            self.backbone = models.mobilenet_v3_large(pretrained=pretrained)
+            feature_dim = self.backbone.classifier[0].in_features
             self.backbone.classifier = nn.Identity()
         else:
             raise ValueError(f"Unsupported backbone: {backbone}")
         
-        # Adaptive feature dimensions based on stage
-        if stage == "foundation":
-            hidden_dim = 256
-            intermediate_dim = 128
-        elif stage == "intermediate":
-            hidden_dim = 384
-            intermediate_dim = 192
-        else:  # advanced/refinement
-            hidden_dim = 512
-            intermediate_dim = 256
-        
-        # Feature processing with residual connections
+        # Feature processing layers
         self.feature_processor = nn.Sequential(
             nn.Dropout(dropout),
-            nn.Linear(feature_dim, hidden_dim),
-            nn.ReLU(),
-            nn.BatchNorm1d(hidden_dim),
+            nn.Linear(feature_dim, 256),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm1d(256),
             nn.Dropout(dropout/2),
-            nn.Linear(hidden_dim, intermediate_dim),
-            nn.ReLU(),
-            nn.BatchNorm1d(intermediate_dim)
+            nn.Linear(256, 128),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm1d(128)
         )
         
-        # Age regression head with attention
+        # Gender embedding (important for bone age)
+        self.gender_embedding = nn.Sequential(
+            nn.Linear(1, 8),
+            nn.ReLU(),
+            nn.Linear(8, 16)
+        )
+        
+        # Combined features
+        combined_dim = 128 + 16  # image features + gender embedding
+        
+        # Age regression head
         self.age_head = nn.Sequential(
             nn.Dropout(dropout/2),
-            nn.Linear(intermediate_dim, intermediate_dim//2),
-            nn.ReLU(),
-            nn.BatchNorm1d(intermediate_dim//2),
+            nn.Linear(combined_dim, 64),
+            nn.ReLU(inplace=True),
             nn.Dropout(dropout/3),
-            nn.Linear(intermediate_dim//2, 1)
-        )
-        
-        # Gender classification head
-        self.gender_head = nn.Sequential(
-            nn.Dropout(dropout/2),
-            nn.Linear(intermediate_dim, intermediate_dim//4),
-            nn.ReLU(),
-            nn.Linear(intermediate_dim//4, 1),
-            nn.Sigmoid()
-        )
-        
-        # Uncertainty estimation
-        self.uncertainty_head = nn.Sequential(
-            nn.Dropout(dropout/2),
-            nn.Linear(intermediate_dim, intermediate_dim//4),
-            nn.ReLU(),
-            nn.Linear(intermediate_dim//4, 1),
-            nn.Softplus()
+            nn.Linear(64, 1)
         )
         
         # Initialize weights
         self._initialize_weights()
     
     def _initialize_weights(self):
-        """Better weight initialization"""
+        """Proper weight initialization"""
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
@@ -347,555 +438,651 @@ class ImprovedBoneAgeModel(nn.Module):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
     
-    def forward(self, x):
-        # Extract features
-        features = self.backbone(x)
-        processed_features = self.feature_processor(features)
+    def forward(self, x, gender):
+        # Extract image features
+        image_features = self.backbone(x)
+        processed_features = self.feature_processor(image_features)
         
-        # Predictions
-        age_pred = self.age_head(processed_features)
-        gender_pred = self.gender_head(processed_features)
-        uncertainty = self.uncertainty_head(processed_features)
+        # Process gender information
+        gender_features = self.gender_embedding(gender.unsqueeze(1))
+        
+        # Combine image and gender features
+        combined = torch.cat([processed_features, gender_features], dim=1)
+        
+        # Predict age
+        age_pred = self.age_head(combined)
+        
+        return {'age': age_pred.squeeze()}
+
+# ============================================================================
+# DATASET CLASS
+# ============================================================================
+
+class BoneAgeDataset(Dataset):
+    """Memory-efficient dataset for bone age training"""
+    
+    def __init__(self, image_paths, ages_months, genders, preprocessor, is_training=True):
+        self.image_paths = image_paths
+        self.ages_months = ages_months
+        self.genders = genders
+        self.preprocessor = preprocessor
+        self.is_training = is_training
+        
+        print(f"📊 Dataset created: {len(self.image_paths)} images")
+        print(f"   Training mode: {is_training}")
+        print(f"   Age range: {min(ages_months):.1f} - {max(ages_months):.1f} months")
+        
+    def __len__(self):
+        return len(self.image_paths)
+    
+    def __getitem__(self, idx):
+        image = self.preprocessor.preprocess_image(self.image_paths[idx], self.is_training)
         
         return {
-            'age': age_pred.squeeze(),
-            'gender': gender_pred.squeeze(),
-            'uncertainty': uncertainty.squeeze(),
-            'features': processed_features  # For potential transfer learning
+            'image': image,
+            'age_months': torch.tensor(self.ages_months[idx], dtype=torch.float32),
+            'gender': torch.tensor(self.genders[idx], dtype=torch.float32),
+            'image_path': self.image_paths[idx]
         }
 
-class EnhancedTrainer:
-    """Enhanced trainer with better training strategies"""
+# ============================================================================
+# TRAINER CLASS
+# ============================================================================
+
+class ResumableTrainer:
+    """Trainer with full checkpoint resuming capabilities"""
     
-    def __init__(self, model, device='cuda', mixed_precision=True):
-        self.model = model.to(device)
+    def __init__(self, checkpoint_manager, device='cpu'):
+        self.checkpoint_manager = checkpoint_manager
         self.device = device
-        self.mixed_precision = mixed_precision and device == 'cuda'
-        self.scaler = torch.cuda.amp.GradScaler() if self.mixed_precision else None
+        self.process = psutil.Process(os.getpid())
         
-        # Training history
-        self.train_losses = []
-        self.val_losses = []
-        self.val_maes = []
-        self.learning_rates = []
-        
-        # Memory optimization
-        torch.backends.cudnn.benchmark = True
-        if device == 'cuda':
-            torch.cuda.empty_cache()
-    
-    def save_checkpoint(self, checkpoint_path: str, epoch: int, val_mae: float, 
-                       optimizer, scheduler, session_id: str, stage: str, is_best=False):
-        """Enhanced checkpoint saving"""
-        checkpoint = {
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict(),
-            'scaler_state_dict': self.scaler.state_dict() if self.scaler else None,
-            'epoch': epoch,
-            'val_mae': val_mae,
-            'train_losses': self.train_losses,
-            'val_losses': self.val_losses,
-            'val_maes': self.val_maes,
-            'learning_rates': self.learning_rates,
-            'session_id': session_id,
-            'stage': stage,
-            'timestamp': datetime.now().isoformat(),
-            'device': str(self.device),
-            'mixed_precision': self.mixed_precision
-        }
-        
-        torch.save(checkpoint, checkpoint_path)
-        
-        if is_best:
-            best_path = checkpoint_path.replace('.pth', '_best.pth')
-            shutil.copy2(checkpoint_path, best_path)
-            
-            # Copy to root for easy access
-            root_best_path = f'best_bone_age_model_{stage}.pth'
-            shutil.copy2(checkpoint_path, root_best_path)
-            print(f"💾 New best {stage} model saved! MAE: {val_mae:.2f} months")
-    
-    def load_checkpoint(self, checkpoint_path: str):
-        """Enhanced checkpoint loading"""
-        if os.path.exists(checkpoint_path):
-            print(f"📂 Loading checkpoint from {checkpoint_path}")
-            checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
-            self.model.load_state_dict(checkpoint['model_state_dict'])
-            
-            # Load training history
-            self.train_losses = checkpoint.get('train_losses', [])
-            self.val_losses = checkpoint.get('val_losses', [])
-            self.val_maes = checkpoint.get('val_maes', [])
-            self.learning_rates = checkpoint.get('learning_rates', [])
-            
-            return checkpoint
-        return None
-    
-    def train_epoch(self, train_loader, optimizer, criterion_age, criterion_gender, 
-                   age_weight=1.0, gender_weight=0.3, uncertainty_weight=0.1, 
-                   gradient_accumulation_steps=1):
-        """Enhanced training epoch with mixed precision and gradient accumulation"""
-        self.model.train()
-        total_loss = 0
-        total_age_loss = 0
-        num_batches = 0
-        
-        # For gradient accumulation
-        optimizer.zero_grad()
-        
-        pbar = tqdm(train_loader, desc="Training")
-        for batch_idx, batch in enumerate(pbar):
-            images = batch['image'].to(self.device, non_blocking=True)
-            ages = batch['age_months'].to(self.device, non_blocking=True)
-            genders = batch['gender'].to(self.device, non_blocking=True)
-            
-            # Mixed precision forward pass
-            if self.mixed_precision:
-                with torch.cuda.amp.autocast():
-                    outputs = self.model(images)
-                    age_loss = criterion_age(outputs['age'], ages)
-                    gender_loss = criterion_gender(outputs['gender'], genders)
-                    uncertainty_loss = torch.mean(outputs['uncertainty'])
-                    
-                    total_loss_batch = (age_weight * age_loss + 
-                                      gender_weight * gender_loss + 
-                                      uncertainty_weight * uncertainty_loss)
-                    
-                    # Scale loss for gradient accumulation
-                    total_loss_batch = total_loss_batch / gradient_accumulation_steps
-            else:
-                outputs = self.model(images)
-                age_loss = criterion_age(outputs['age'], ages)
-                gender_loss = criterion_gender(outputs['gender'], genders)
-                uncertainty_loss = torch.mean(outputs['uncertainty'])
-                
-                total_loss_batch = (age_weight * age_loss + 
-                                  gender_weight * gender_loss + 
-                                  uncertainty_weight * uncertainty_loss)
-                total_loss_batch = total_loss_batch / gradient_accumulation_steps
-            
-            # Backward pass
-            if self.mixed_precision:
-                self.scaler.scale(total_loss_batch).backward()
-            else:
-                total_loss_batch.backward()
-            
-            # Update weights every gradient_accumulation_steps
-            if (batch_idx + 1) % gradient_accumulation_steps == 0:
-                if self.mixed_precision:
-                    self.scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                    self.scaler.step(optimizer)
-                    self.scaler.update()
-                else:
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                    optimizer.step()
-                
-                optimizer.zero_grad()
-            
-            # Update metrics
-            total_loss += total_loss_batch.item() * gradient_accumulation_steps
-            total_age_loss += age_loss.item()
-            num_batches += 1
-            
-            # Update progress bar
-            pbar.set_postfix({
-                'Loss': f'{total_loss_batch.item() * gradient_accumulation_steps:.4f}',
-                'Age MAE': f'{age_loss.item():.2f}',
-                'LR': f'{optimizer.param_groups[0]["lr"]:.6f}'
-            })
-            
-            # Memory cleanup
-            if batch_idx % 50 == 0:
-                torch.cuda.empty_cache() if self.device == 'cuda' else None
-        
-        avg_loss = total_loss / num_batches
-        self.train_losses.append(avg_loss)
-        self.learning_rates.append(optimizer.param_groups[0]['lr'])
+    def monitor_resources(self):
+        """Monitor system resources"""
+        cpu_percent = psutil.cpu_percent(interval=0.1)
+        memory_info = self.process.memory_info()
+        memory_mb = memory_info.rss / 1024 / 1024
+        memory_percent = psutil.virtual_memory().percent
         
         return {
-            'total_loss': avg_loss,
-            'age_loss': total_age_loss / num_batches
+            'cpu_percent': cpu_percent,
+            'memory_mb': memory_mb,
+            'memory_percent': memory_percent
         }
     
-    def validate(self, val_loader, criterion_age, criterion_gender):
-        """Enhanced validation with memory optimization"""
-        self.model.eval()
+    def train_epoch(self, model, train_loader, optimizer, criterion, epoch):
+        """Train single epoch with progress tracking"""
+        model.train()
         total_loss = 0
-        age_predictions = []
-        age_targets = []
+        epoch_start = time.time()
+        
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch}")
+        for batch_idx, batch in enumerate(pbar):
+            try:
+                images = batch['image'].to(self.device)
+                ages = batch['age_months'].to(self.device)
+                genders = batch['gender'].to(self.device)
+                
+                optimizer.zero_grad()
+                outputs = model(images, genders)
+                loss = criterion(outputs['age'], ages)
+                loss.backward()
+                
+                # Gradient clipping for stability
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                
+                total_loss += loss.item()
+                
+                # Update progress bar
+                pbar.set_postfix({
+                    'Loss': f'{loss.item():.4f}',
+                    'LR': f'{optimizer.param_groups[0]["lr"]:.6f}',
+                    'Batch': f'{batch_idx+1}/{len(train_loader)}'
+                })
+                
+                # Memory cleanup every 50 batches
+                if batch_idx % 50 == 0:
+                    gc.collect()
+                    
+                # Resource monitoring every 100 batches
+                if batch_idx % 100 == 0:
+                    resources = self.monitor_resources()
+                    if resources['memory_percent'] > 85:
+                        print(f"\n⚠️  High memory usage: {resources['memory_percent']:.1f}%")
+                        gc.collect()
+            
+            except Exception as e:
+                print(f"\n❌ Error in batch {batch_idx}: {e}")
+                continue
+        
+        epoch_time = time.time() - epoch_start
+        avg_loss = total_loss / len(train_loader)
+        
+        return avg_loss, epoch_time
+    
+    def validate(self, model, val_loader, criterion):
+        """Fast validation"""
+        model.eval()
+        all_predictions = []
+        all_targets = []
+        total_loss = 0
         
         with torch.no_grad():
             for batch in tqdm(val_loader, desc="Validating"):
-                images = batch['image'].to(self.device, non_blocking=True)
-                ages = batch['age_months'].to(self.device, non_blocking=True)
-                genders = batch['gender'].to(self.device, non_blocking=True)
+                try:
+                    images = batch['image'].to(self.device)
+                    ages = batch['age_months'].to(self.device)
+                    genders = batch['gender'].to(self.device)
+                    
+                    outputs = model(images, genders)
+                    loss = criterion(outputs['age'], ages)
+                    
+                    total_loss += loss.item()
+                    all_predictions.extend(outputs['age'].cpu().numpy())
+                    all_targets.extend(ages.cpu().numpy())
                 
-                if self.mixed_precision:
-                    with torch.cuda.amp.autocast():
-                        outputs = self.model(images)
-                else:
-                    outputs = self.model(images)
-                
-                age_loss = criterion_age(outputs['age'], ages)
-                gender_loss = criterion_gender(outputs['gender'], genders)
-                total_loss += (age_loss + 0.3 * gender_loss).item()
-                
-                age_predictions.extend(outputs['age'].cpu().numpy())
-                age_targets.extend(ages.cpu().numpy())
+                except Exception as e:
+                    print(f"❌ Error in validation batch: {e}")
+                    continue
+        
+        if len(all_predictions) == 0:
+            return {'val_loss': float('inf'), 'mae': float('inf'), 'r2': 0.0}
         
         avg_loss = total_loss / len(val_loader)
-        age_mae = mean_absolute_error(age_targets, age_predictions)
-        age_r2 = r2_score(age_targets, age_predictions)
-        
-        self.val_losses.append(avg_loss)
-        self.val_maes.append(age_mae)
+        mae = mean_absolute_error(all_targets, all_predictions)
+        r2 = r2_score(all_targets, all_predictions)
         
         return {
             'val_loss': avg_loss,
-            'age_mae': age_mae,
-            'age_r2': age_r2,
-            'predictions': age_predictions,
-            'targets': age_targets
+            'mae': mae,
+            'r2': r2,
+            'predictions': all_predictions,
+            'targets': all_targets
         }
-
-def create_stage_specific_dataset(all_paths: List[str], all_ages: List[float], 
-                                all_genders: List[int], available_paths: List[str], 
-                                stage: str, max_samples: int = None) -> Tuple[List[str], List[float], List[int]]:
-    """Create dataset specific to training stage"""
     
-    # Filter to only available images
-    available_set = set(available_paths)
-    filtered_data = []
-    
-    for i, path in enumerate(all_paths):
-        if path in available_set:
-            filtered_data.append((path, all_ages[i], all_genders[i]))
-    
-    if not filtered_data:
-        return [], [], []
-    
-    # Limit samples if specified
-    if max_samples and len(filtered_data) > max_samples:
-        # For foundation stage, use easier samples
-        if stage == "foundation":
-            # Sort by age (easier to predict middle ages)
-            filtered_data.sort(key=lambda x: abs(x[1] - 120))  # Sort by distance from 10 years
-        filtered_data = filtered_data[:max_samples]
-    
-    paths, ages, genders = zip(*filtered_data)
-    return list(paths), list(ages), list(genders)
-
-def get_stage_config(stage: str) -> Dict:
-    """Get configuration for training stage"""
-    configs = {
-        "foundation": {
-            "epochs": 15,
-            "batch_size": 24,
-            "learning_rate": 3e-4,
-            "weight_decay": 1e-4,
-            "max_samples": 2000,
-            "backbone": "efficientnet_b0",
-            "gradient_accumulation": 2
-        },
-        "intermediate": {
-            "epochs": 20,
-            "batch_size": 16,
-            "learning_rate": 1e-4,
-            "weight_decay": 5e-5,
-            "max_samples": 3000,
-            "backbone": "efficientnet_b3",
-            "gradient_accumulation": 2
-        },
-        "advanced": {
-            "epochs": 25,
-            "batch_size": 12,
-            "learning_rate": 5e-5,
-            "weight_decay": 1e-5,
-            "max_samples": None,  # Use all available
-            "backbone": "efficientnet_b3",
-            "gradient_accumulation": 3
-        },
-        "refinement": {
-            "epochs": 30,
-            "batch_size": 8,
-            "learning_rate": 1e-5,
-            "weight_decay": 1e-6,
-            "max_samples": None,
-            "backbone": "efficientnet_b3",
-            "gradient_accumulation": 4
-        }
-    }
-    return configs.get(stage, configs["foundation"])
-
-def train_stage(csv_file: str, stage: str, session_manager: SessionManager, 
-               previous_model_path: str = None):
-    """Train a specific stage"""
-    
-    print(f"\n🎯 Starting {stage.upper()} stage training")
-    print("="*50)
-    
-    # Load full dataset
-    if not os.path.exists(csv_file):
-        print(f"❌ Dataset not found: {csv_file}")
-        return None
-    
-    df = pd.read_csv(csv_file)
-    all_image_paths = df.iloc[:, 0].tolist()
-    all_ages_months = df.iloc[:, 1].tolist()
-    all_genders = df.iloc[:, 2].tolist()
-    
-    # Get available images (not used before)
-    available_paths = session_manager.get_available_images(all_image_paths, stage)
-    
-    if len(available_paths) < 50:  # Minimum threshold
-        print(f"❌ Not enough unused images for {stage} stage: {len(available_paths)}")
-        return None
-    
-    # Get stage configuration
-    config = get_stage_config(stage)
-    print(f"📋 Stage config: {config}")
-    
-    # Create stage-specific dataset
-    stage_paths, stage_ages, stage_genders = create_stage_specific_dataset(
-        all_image_paths, all_ages_months, all_genders, 
-        available_paths, stage, config['max_samples']
-    )
-    
-    print(f"📊 Using {len(stage_paths)} images for {stage} stage")
-    
-    # Split dataset
-    train_paths, val_paths, train_ages, val_ages, train_genders, val_genders = train_test_split(
-        stage_paths, stage_ages, stage_genders, 
-        test_size=0.15, random_state=None, stratify=stage_genders  # No fixed seed!
-    )
-    
-    print(f"📊 Stage split - Train: {len(train_paths)}, Val: {len(val_paths)}")
-    
-    # Create datasets
-    train_dataset = CurriculumDataset(train_paths, train_ages, train_genders, 
-                                    is_training=True, stage=stage)
-    val_dataset = CurriculumDataset(val_paths, val_ages, val_genders, 
-                                  is_training=False, stage=stage)
-    
-    # Create dataloaders with optimized settings
-    num_workers = min(4, os.cpu_count() or 1)
-    train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], 
-                            shuffle=True, num_workers=num_workers, 
-                            pin_memory=True, drop_last=True)
-    val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], 
-                          shuffle=False, num_workers=num_workers, pin_memory=True)
-    
-    # Create model
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model = ImprovedBoneAgeModel(backbone=config['backbone'], stage=stage)
-    
-    # Load previous model if available
-    if previous_model_path and os.path.exists(previous_model_path):
-        print(f"🔄 Loading previous model: {previous_model_path}")
-        checkpoint = torch.load(previous_model_path, map_location=device, weights_only=False)
+    def run_training(self, model, train_loader, val_loader, config, resume_from=None):
+        """Main training loop with full resuming capability"""
         
-        # Try to load compatible weights
-        try:
-            model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-            print("✅ Loaded compatible weights from previous stage")
-        except Exception as e:
-            print(f"⚠️ Could not load previous weights: {e}")
-            print("🆕 Starting with fresh weights")
-    
-    # Create trainer
-    trainer = EnhancedTrainer(model, device=device, mixed_precision=(device=='cuda'))
-    
-    # Setup optimizer with different strategies per stage
-    if stage == "foundation":
-        optimizer = optim.AdamW(model.parameters(), lr=config['learning_rate'], 
-                              weight_decay=config['weight_decay'], betas=(0.9, 0.999))
-        scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=config['learning_rate'], 
-                                                steps_per_epoch=len(train_loader), 
-                                                epochs=config['epochs'])
-    else:
-        optimizer = optim.AdamW(model.parameters(), lr=config['learning_rate'], 
-                              weight_decay=config['weight_decay'])
-        scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=5, T_mult=2)
-    
-    # Loss functions
-    criterion_age = nn.SmoothL1Loss()  # More robust than L1Loss
-    criterion_gender = nn.BCELoss()
-    
-    # Training loop
-    best_val_mae = float('inf')
-    patience_counter = 0
-    patience = 8
-    
-    session_id = hashlib.md5(f"{stage}_{datetime.now()}".encode()).hexdigest()[:8]
-    model_dir = f'models/{stage}_stage'
-    os.makedirs(model_dir, exist_ok=True)
-    
-    print(f"🚀 Starting {stage} training for {config['epochs']} epochs...")
-    
-    for epoch in range(config['epochs']):
-        print(f"\nEpoch {epoch + 1}/{config['epochs']} ({stage})")
-        print("-" * 30)
+        print(f"\n🚀 Initializing training...")
+        print(f"📊 Model parameters: {sum(p.numel() for p in model.parameters()):,}")
         
-        # Training
-        train_metrics = trainer.train_epoch(
-            train_loader, optimizer, criterion_age, criterion_gender,
-            gradient_accumulation_steps=config['gradient_accumulation']
+        # Setup optimizer and scheduler
+        optimizer = optim.AdamW(
+            model.parameters(),
+            lr=config['learning_rate'],
+            weight_decay=config['weight_decay'],
+            betas=(0.9, 0.999)
         )
         
-        # Validation
-        val_metrics = trainer.validate(val_loader, criterion_age, criterion_gender)
+        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.7)
+        criterion = nn.SmoothL1Loss()  # Robust loss function
         
-        # Learning rate step
-        if stage == "foundation":
-            scheduler.step()
+        # Initialize training state
+        start_epoch = 0
+        best_mae = float('inf')
+        patience_counter = 0
+        history = {'train_loss': [], 'val_loss': [], 'val_mae': [], 'epoch_times': []}
+        total_training_time = 0
+        
+        # Resume from checkpoint if provided
+        if resume_from:
+            resume_info = self.checkpoint_manager.load_checkpoint(
+                resume_from, model, optimizer, scheduler
+            )
+            start_epoch = resume_info['start_epoch']
+            best_mae = resume_info['best_mae']
+            history = resume_info['history']
+            total_training_time = resume_info.get('total_training_time', 0)
+            print(f"🔄 Resuming training from epoch {start_epoch}")
         else:
-            scheduler.step(val_metrics['val_loss'])
+            print(f"🆕 Starting fresh training")
         
-        # Print metrics
-        print(f"Train Loss: {train_metrics['total_loss']:.4f}")
-        print(f"Val MAE: {val_metrics['age_mae']:.2f} months")
-        print(f"Val R²: {val_metrics['age_r2']:.4f}")
-        print(f"Learning Rate: {optimizer.param_groups[0]['lr']:.6f}")
+        print(f"\n📋 Training Configuration:")
+        print(f"  🎯 Target epochs: {config['epochs']}")
+        print(f"  📏 Image size: {config['image_size']}")
+        print(f"  📦 Batch size: {config['batch_size']}")
+        print(f"  🎓 Learning rate: {config['learning_rate']}")
+        print(f"  ⏳ Early stopping patience: {config['patience']}")
         
-        # Save checkpoint
-        checkpoint_path = f'{model_dir}/checkpoint_epoch_{epoch+1}.pth'
-        is_best = val_metrics['age_mae'] < best_val_mae
+        # Estimate training time
+        if not resume_from:
+            print(f"\n⏱️  Time Estimates (per epoch):")
+            print(f"  📊 Training: 25-45 minutes")
+            print(f"  📊 Validation: 3-5 minutes")
+            print(f"  📊 Total per epoch: ~30-50 minutes")
+            print(f"  📊 Full training: ~{config['epochs'] * 0.5:.1f}-{config['epochs'] * 0.8:.1f} hours")
         
-        trainer.save_checkpoint(checkpoint_path, epoch, val_metrics['age_mae'], 
-                              optimizer, scheduler, session_id, stage, is_best)
+        print(f"\n💡 Remember: You can safely stop with Ctrl+C anytime!")
+        print(f"💡 Resume later with: python {__file__} --resume --csv <your_csv>")
+        print("="*60)
         
-        # Early stopping
-        if is_best:
-            best_val_mae = val_metrics['age_mae']
-            patience_counter = 0
+        # Training loop
+        try:
+            for epoch in range(start_epoch, config['epochs']):
+                epoch_start_time = time.time()
+                
+                print(f"\n🔄 Epoch {epoch + 1}/{config['epochs']}")
+                print("-" * 50)
+                
+                # Train
+                train_loss, train_time = self.train_epoch(
+                    model, train_loader, optimizer, criterion, epoch + 1
+                )
+                
+                # Validate
+                val_metrics = self.validate(model, val_loader, criterion)
+                
+                # Update history
+                epoch_total_time = time.time() - epoch_start_time
+                total_training_time += epoch_total_time
+                
+                history['train_loss'].append(train_loss)
+                history['val_loss'].append(val_metrics['val_loss'])
+                history['val_mae'].append(val_metrics['mae'])
+                history['epoch_times'].append(epoch_total_time)
+                
+                # Step scheduler
+                scheduler.step()
+                
+                # Check if best model
+                is_best = val_metrics['mae'] < best_mae
+                if is_best:
+                    best_mae = val_metrics['mae']
+                    patience_counter = 0
+                    print(f"🎉 New best model!")
+                else:
+                    patience_counter += 1
+                
+                # Print epoch results
+                print(f"\n📊 Epoch {epoch + 1} Results:")
+                print(f"  🔸 Train Loss: {train_loss:.4f}")
+                print(f"  🔸 Val MAE: {val_metrics['mae']:.2f} months ({val_metrics['mae']/12:.2f} years)")
+                print(f"  🔸 Val R²: {val_metrics['r2']:.4f}")
+                print(f"  🔸 Learning Rate: {optimizer.param_groups[0]['lr']:.6f}")
+                print(f"  🔸 Epoch Time: {epoch_total_time/60:.1f} minutes")
+                print(f"  🔸 Total Time: {total_training_time/3600:.1f} hours")
+                
+                # Estimate remaining time
+                if epoch > start_epoch:
+                    avg_epoch_time = total_training_time / (epoch + 1 - start_epoch)
+                    remaining_epochs = config['epochs'] - (epoch + 1)
+                    estimated_remaining = (remaining_epochs * avg_epoch_time) / 3600
+                    print(f"  🔸 Est. Remaining: {estimated_remaining:.1f} hours")
+                
+                # Resource monitoring
+                resources = self.monitor_resources()
+                print(f"  🔸 System: CPU {resources['cpu_percent']:.1f}%, RAM {resources['memory_percent']:.1f}%")
+                
+                # Save checkpoint after every epoch
+                self.checkpoint_manager.save_checkpoint(
+                    model, optimizer, scheduler, epoch, val_metrics['mae'],
+                    train_loss, val_metrics['val_loss'], history, 
+                    total_training_time, is_best
+                )
+                
+                print(f"💾 Progress saved. Safe to stop and resume anytime!")
+                
+                # Early stopping check
+                if patience_counter >= config['patience']:
+                    print(f"\n⏹️  Early stopping triggered!")
+                    print(f"📊 No improvement for {config['patience']} epochs")
+                    print(f"🏆 Best MAE: {best_mae:.2f} months")
+                    break
+                
+                # Memory cleanup
+                gc.collect()
+        
+        except KeyboardInterrupt:
+            print(f"\n\n⏸️  Training interrupted by user at epoch {epoch + 1}")
+            print(f"💾 Progress saved successfully!")
+            print(f"🔄 Resume anytime with: python {__file__} --resume --csv <your_csv>")
+            print(f"🏆 Current best MAE: {best_mae:.2f} months")
+        
+        except Exception as e:
+            print(f"\n❌ Training error: {e}")
+            print(f"💾 Progress saved. You can resume from the last checkpoint.")
+            print(f"🏆 Current best MAE: {best_mae:.2f} months")
+        
+        # Mark training as completed
+        self.checkpoint_manager.mark_training_completed(best_mae, total_training_time)
+        
+        print(f"\n🎉 Training session completed!")
+        print(f"🏆 Best MAE achieved: {best_mae:.2f} months ({best_mae/12:.2f} years)")
+        print(f"⏱️  Total training time: {total_training_time/3600:.1f} hours")
+        
+        # Show comparison to benchmarks
+        print(f"\n📊 Performance Comparison:")
+        if best_mae < 6:
+            print(f"  🥇 Excellent! Near RSNA challenge winner level (4.2-4.5 months)")
+        elif best_mae < 8:
+            print(f"  🥈 Very good! Competitive performance")
+        elif best_mae < 12:
+            print(f"  🥉 Good! Solid results for laptop training")
         else:
-            patience_counter += 1
-            
-        if patience_counter >= patience:
-            print(f"⏹️ Early stopping after {patience} epochs without improvement")
-            break
+            print(f"  📈 Room for improvement - consider longer training or more data")
         
-        # Memory cleanup
-        gc.collect()
-        if device == 'cuda':
-            torch.cuda.empty_cache()
+        return best_mae
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+
+def show_training_status(project_name="bone_age"):
+    """Show current training status"""
+    checkpoint_manager = CheckpointManager(project_name=project_name)
+    progress = checkpoint_manager.get_training_progress()
     
-    # Record session
-    session = TrainingSession(
-        session_id=session_id,
-        used_images=stage_paths,  # All images used in this stage
-        epoch_start=0,
-        epoch_end=epoch,
-        best_mae=best_val_mae,
-        timestamp=datetime.now().isoformat(),
-        stage=stage
-    )
-    session_manager.add_session(session)
+    if not progress:
+        print("❌ No training sessions found")
+        return
     
-    print(f"✅ {stage.upper()} stage completed!")
-    print(f"🎯 Best validation MAE: {best_val_mae:.2f} months")
-    print(f"📚 Used {len(stage_paths)} images in this stage")
+    print(f"📊 Training Status for Project: {project_name}")
+    print("="*50)
     
-    # Return path to best model
-    best_models = [f for f in os.listdir(model_dir) if f.endswith('_best.pth')]
-    if best_models:
-        return os.path.join(model_dir, best_models[0])
-    return None
+    # Basic info
+    print(f"Status: {progress.get('status', 'Unknown').upper()}")
+    print(f"Current Epoch: {progress.get('current_epoch', 'Unknown')}")
+    print(f"Best MAE: {progress.get('best_mae', 'Unknown'):.2f} months")
+    
+    # Time info
+    total_time = progress.get('total_training_time', 0)
+    if total_time > 0:
+        hours = int(total_time // 3600)
+        minutes = int((total_time % 3600) // 60)
+        print(f"Training Time: {hours}h {minutes}m")
+    
+    print(f"Last Update: {progress.get('last_update', 'Unknown')[:19]}")
+    
+    # Show available checkpoints
+    checkpoints_dir = f"checkpoints/{project_name}"
+    if os.path.exists(checkpoints_dir):
+        checkpoints = glob.glob(os.path.join(checkpoints_dir, "checkpoint_epoch_*.pth"))
+        checkpoints.sort(key=lambda x: int(x.split('_')[-1].split('.')[0]))
+        
+        print(f"\nAvailable Checkpoints: {len(checkpoints)}")
+        for checkpoint in checkpoints[-3:]:  # Show last 3
+            epoch = int(checkpoint.split('_')[-1].split('.')[0])
+            print(f"  📁 Epoch {epoch:3d}: {os.path.basename(checkpoint)}")
+        
+        # Best model
+        best_model_path = os.path.join(checkpoints_dir, "best_model.pth")
+        if os.path.exists(best_model_path):
+            print(f"  🏆 Best model: best_model.pth")
+
+def create_sample_dataset(csv_path, sample_size=1000, output_path="sample_dataset.csv"):
+    """Create a smaller sample dataset for testing"""
+    if not os.path.exists(csv_path):
+        print(f"❌ Dataset not found: {csv_path}")
+        return
+    
+    df = pd.read_csv(csv_path)
+    print(f"📊 Original dataset: {len(df)} images")
+    
+    if len(df) <= sample_size:
+        print(f"📊 Dataset is already small enough ({len(df)} <= {sample_size})")
+        return
+    
+    # Stratified sampling by gender and age groups
+    df['age_group'] = pd.cut(df.iloc[:, 1], bins=5, labels=False)
+    sample_df = df.groupby(['age_group', df.iloc[:, 2]], group_keys=False).apply(
+        lambda x: x.sample(min(len(x), sample_size // 10))
+    ).reset_index(drop=True)
+    
+    # Ensure we don't exceed sample_size
+    if len(sample_df) > sample_size:
+        sample_df = sample_df.sample(n=sample_size, random_state=42)
+    
+    # Remove helper column
+    sample_df = sample_df.drop('age_group', axis=1)
+    
+    sample_df.to_csv(output_path, index=False)
+    print(f"✅ Sample dataset created: {output_path}")
+    print(f"📊 Sample size: {len(sample_df)} images")
+    print(f"📈 Age range: {sample_df.iloc[:, 1].min():.1f} - {sample_df.iloc[:, 1].max():.1f} months")
+
+# ============================================================================
+# MAIN TRAINING FUNCTION
+# ============================================================================
 
 def main():
-    """Main multi-stage training pipeline"""
-    print("🦴 Enhanced Multi-Stage Bone Age Training System")
+    """Main training interface with full functionality"""
+    parser = argparse.ArgumentParser(
+        description='🦴 Complete Resumable Bone Age Training System',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+    # Start new training
+    python bone_age_training.py --csv dataset.csv
+    
+    # Continue training your existing model
+    python bone_age_training.py --csv dataset.csv --existing_model best_bone_age_model.pth
+    
+    # Resume training
+    python bone_age_training.py --resume --csv dataset.csv
+    
+    # Check training status
+    python bone_age_training.py --status
+    
+    # Create sample dataset for testing
+    python bone_age_training.py --sample dataset.csv --size 1000
+        """
+    )
+    
+    parser.add_argument('--csv', type=str, help='Path to CSV dataset file')
+    parser.add_argument('--existing_model', type=str, help='Path to existing model to continue training (e.g., best_bone_age_model.pth)')
+    parser.add_argument('--resume', action='store_true', help='Resume from latest checkpoint')
+    parser.add_argument('--status', action='store_true', help='Show training status')
+    parser.add_argument('--sample', type=str, help='Create sample dataset from CSV')
+    parser.add_argument('--size', type=int, default=1000, help='Sample size for --sample')
+    parser.add_argument('--project', type=str, default='bone_age', help='Project name')
+    parser.add_argument('--config', type=str, help='Custom config JSON file')
+    
+    args = parser.parse_args()
+    
+    # Handle different commands
+    if args.status:
+        show_training_status(args.project)
+        return
+    
+    if args.sample:
+        create_sample_dataset(args.sample, args.size)
+        return
+    
+    # Main training interface
+    print("🦴 Complete Resumable Bone Age Training System")
     print("="*60)
-    print("🎯 Features:")
-    print("  • No repeated images across sessions")
-    print("  • Curriculum learning (easy → hard)")
-    print("  • Progressive model complexity")
-    print("  • Laptop-optimized training")
-    print("  • Auto-resume capability")
+    print("✨ Features:")
+    print("  • Automatic checkpoint saving after every epoch")
+    print("  • Resume training from any point")
+    print("  • Safe interruption with Ctrl+C")
+    print("  • Optimized for laptop training (CPU + 16GB RAM)")
+    print("  • Progress tracking and history preservation")
+    print("  • Best model auto-saving")
+    print("  • Memory efficient processing")
     print()
     
-    # Get dataset
-    csv_file = input("📄 Enter CSV file path (or press Enter for 'bone_age_dataset.csv'): ").strip()
-    if not csv_file:
-        csv_file = "bone_age_dataset.csv"
+    # Initialize checkpoint manager
+    checkpoint_manager = CheckpointManager(project_name=args.project)
     
-    csv_file = csv_file.strip('"').strip("'")
+    # Check for existing training session
+    latest_checkpoint = None
+    if checkpoint_manager.should_resume() or args.resume:
+        if args.resume:
+            latest_checkpoint = checkpoint_manager.find_latest_checkpoint()
+            if latest_checkpoint:
+                print(f"✅ Will resume from: {os.path.basename(latest_checkpoint)}")
+            else:
+                print("❌ No checkpoint found to resume from")
+                return
+        else:
+            resume_choice = input("🔄 Resume from latest checkpoint? (y/n): ").strip().lower()
+            if resume_choice == 'y':
+                latest_checkpoint = checkpoint_manager.find_latest_checkpoint()
+                print(f"✅ Will resume from: {os.path.basename(latest_checkpoint)}")
+            else:
+                print("🆕 Starting fresh training")
+    
+    # Get dataset
+    if args.csv:
+        csv_file = args.csv
+    else:
+        csv_file = input("📄 Enter CSV file path: ").strip().strip('"').strip("'")
     
     if not os.path.exists(csv_file):
         print(f"❌ Dataset not found: {csv_file}")
         return
     
-    print(f"📊 Using dataset: {csv_file}")
-    
-    # Initialize session manager
-    session_manager = SessionManager()
-    
-    # Determine next stage
-    next_stage = session_manager.get_next_stage()
-    print(f"🎯 Next training stage: {next_stage.upper()}")
-    
-    # Ask user for confirmation
-    proceed = input(f"\n🚀 Start {next_stage} stage training? (y/n): ").lower().strip()
-    if proceed != 'y':
-        print("👋 Training cancelled")
-        return
-    
-    # Find previous model if not foundation stage
-    previous_model = None
-    if next_stage != "foundation":
-        # Look for best model from previous stages
-        stage_order = ["foundation", "intermediate", "advanced", "refinement"]
-        current_idx = stage_order.index(next_stage)
-        
-        for prev_stage in reversed(stage_order[:current_idx]):
-            prev_model_path = f'best_bone_age_model_{prev_stage}.pth'
-            if os.path.exists(prev_model_path):
-                previous_model = prev_model_path
-                print(f"🔄 Will transfer from: {previous_model}")
-                break
-    
-    # Train the stage
-    best_model_path = train_stage(csv_file, next_stage, session_manager, previous_model)
-    
-    if best_model_path:
-        print(f"\n🎉 {next_stage.upper()} stage training completed!")
-        print(f"💾 Best model saved: {best_model_path}")
-        
-        # Show next steps
-        used_images = session_manager.get_used_images()
-        df = pd.read_csv(csv_file)
-        total_images = len(df)
-        remaining_images = total_images - len(used_images)
-        
-        print(f"\n📊 Training Progress:")
-        print(f"  Total images in dataset: {total_images}")
-        print(f"  Images used so far: {len(used_images)}")
-        print(f"  Remaining images: {remaining_images}")
-        print(f"  Progress: {(len(used_images)/total_images)*100:.1f}%")
-        
-        if remaining_images > 50:
-            next_next_stage = session_manager.get_next_stage()
-            print(f"\n🔮 Next recommended stage: {next_next_stage.upper()}")
-            print("   Run this script again to continue training!")
-        else:
-            print("\n🏆 All available images have been used!")
-            print("   Consider getting more data or adjusting training strategy.")
-        
-        # Usage example
-        print(f"\n💡 To use the trained model:")
-        print(f"```python")
-        print(f"# Load the model")
-        print(f"from bone_age_predictor import BoneAgePredictor")
-        print(f"predictor = BoneAgePredictor('{best_model_path}')")
-        print(f"")
-        print(f"# Predict on new image")
-        print(f"result = predictor.predict_single_image('path/to/xray.jpg')")
-        print(f"print(f'Predicted age: {{result.predicted_age_months:.1f}} months')")
-        print(f"```")
+    # Load configuration
+    if args.config and os.path.exists(args.config):
+        with open(args.config, 'r') as f:
+            config = json.load(f)
+        print(f"📋 Loaded config from: {args.config}")
     else:
-        print("❌ Training failed or was interrupted")
+        # Default laptop-optimized configuration
+        config = {
+            'image_size': 384,          # Smaller for faster training
+            'batch_size': 8,            # Small batch size for 16GB RAM
+            'epochs': 25,               # Reasonable number of epochs
+            'learning_rate': 1e-3,      # Good starting learning rate
+            'weight_decay': 1e-4,       # Regularization
+            'patience': 6,              # Early stopping patience
+            'backbone': 'efficientnet_b0',  # Fastest EfficientNet
+            'num_workers': 2,           # Conservative for laptop CPU
+            'test_size': 0.15           # Validation split
+        }
+    
+    print(f"📋 Training Configuration:")
+    for key, value in config.items():
+        print(f"  {key}: {value}")
+    
+    # Save configuration
+    checkpoint_manager.save_config(config)
+    
+    # Load and analyze dataset
+    df = pd.read_csv(csv_file)
+    print(f"\n📊 Dataset Analysis:")
+    print(f"  📁 Total images: {len(df)}")
+    print(f"  📈 Age range: {df.iloc[:, 1].min():.1f} - {df.iloc[:, 1].max():.1f} months")
+    print(f"  👥 Gender distribution: {df.iloc[:, 2].value_counts().to_dict()}")
+    
+    # Handle large datasets
+    if len(df) > 10000:
+        print(f"\n⚠️  Large dataset detected ({len(df)} images)")
+        print(f"💡 For laptop training, consider using a sample first:")
+        print(f"   python {__file__} --sample {csv_file} --size 4000")
+        
+        use_full = input("Use full dataset? (y/n, n for sample): ").strip().lower()
+        if use_full != 'y':
+            sample_size = min(4000, len(df))
+            df = df.sample(n=sample_size, random_state=42)
+            print(f"📉 Using sample of {len(df)} images")
+    
+    # Split dataset
+    train_df, val_df = train_test_split(
+        df, 
+        test_size=config.get('test_size', 0.15), 
+        random_state=42, 
+        stratify=df.iloc[:, 2]  # Stratify by gender
+    )
+    
+    print(f"\n📊 Dataset Split:")
+    print(f"  🎓 Training: {len(train_df)} images")
+    print(f"  ✅ Validation: {len(val_df)} images")
+    
+    # Create preprocessor and datasets
+    preprocessor = LaptopOptimizedPreprocessor(image_size=config['image_size'])
+    
+    train_dataset = BoneAgeDataset(
+        train_df.iloc[:, 0].tolist(),
+        train_df.iloc[:, 1].tolist(),
+        train_df.iloc[:, 2].tolist(),
+        preprocessor,
+        is_training=True
+    )
+    
+    val_dataset = BoneAgeDataset(
+        val_df.iloc[:, 0].tolist(),
+        val_df.iloc[:, 1].tolist(),
+        val_df.iloc[:, 2].tolist(),
+        preprocessor,
+        is_training=False
+    )
+    
+    # Create data loaders
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config['batch_size'],
+        shuffle=True,
+        num_workers=config.get('num_workers', 2),
+        pin_memory=False,  # Disable for CPU training
+        drop_last=True
+    )
+    
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config['batch_size'],
+        shuffle=False,
+        num_workers=config.get('num_workers', 2),
+        pin_memory=False
+    )
+    
+    print(f"📦 Data loaders created:")
+    print(f"  🎓 Train batches: {len(train_loader)}")
+    print(f"  ✅ Val batches: {len(val_loader)}")
+    
+    # Create model and trainer
+    device = 'cpu'  # Force CPU for laptop training
+    model = LightweightBoneAgeModel(
+        backbone=config.get('backbone', 'efficientnet_b0'),
+        pretrained=True,
+        dropout=0.3
+    )
+    
+    # Load existing model if provided
+    existing_model_info = None
+    if args.existing_model and not latest_checkpoint:  # Only if not resuming from checkpoint
+        try:
+            existing_model_info = checkpoint_manager.load_existing_model(args.existing_model, model)
+            print(f"🎯 Will continue training from your existing model")
+            print(f"📈 Goal: Improve beyond {existing_model_info['previous_mae']} months MAE")
+        except Exception as e:
+            print(f"❌ Error loading existing model: {e}")
+            print(f"💡 Starting fresh training instead...")
+            existing_model_info = None
+    
+    trainer = ResumableTrainer(checkpoint_manager, device)
+    
+    # Final confirmation
+    if not latest_checkpoint:
+        print(f"\n🚨 FINAL CONFIRMATION:")
+        print(f"  📊 Training {len(df)} images for up to {config['epochs']} epochs")
+        print(f"  ⏱️  Estimated time: {config['epochs'] * 0.5:.1f}-{config['epochs'] * 0.8:.1f} hours")
+        print(f"  💾 Checkpoints will be saved to: checkpoints/{args.project}/")
+        if existing_model_info:
+            print(f"  🔄 Continuing from existing model (Previous MAE: {existing_model_info['previous_mae']})")
+        else:
+            print(f"  🆕 Starting fresh training")
+        print(f"  🛑 You can safely stop anytime with Ctrl+C")
+        
+        proceed = input("\n🚀 Start training? (y/n): ").strip().lower()
+        if proceed != 'y':
+            print("👋 Training cancelled")
+            return
+    
+    # Run training
+    try:
+        best_mae = trainer.run_training(
+            model, train_loader, val_loader, config, latest_checkpoint
+        )
+        
+        print(f"\n🎉 Training completed successfully!")
+        print(f"🏆 Final best MAE: {best_mae:.2f} months")
+        print(f"💾 Best model saved in: checkpoints/{args.project}/best_model.pth")
+        
+    except Exception as e:
+        print(f"\n❌ Training failed with error: {e}")
+        print(f"💾 Check checkpoints/{args.project}/ for saved progress")
 
 if __name__ == "__main__":
     main()
