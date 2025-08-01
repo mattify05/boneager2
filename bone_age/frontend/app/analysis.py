@@ -61,7 +61,7 @@ def display():
             image = helpers.decode_image(uploaded_file.read())
             result = helpers.estimate_bone_age(image)
 
-            st.success(f"Estimated Bone Age: **{result['predicted_age_years']} years**")
+            st.success(f"Estimated Bone Age: **{result['predicted_age_months']} months ({result['predicted_age_years']} years)**")
             st.success(f"Confidence: **{result['confidence']}**")
             st.success(f"Uncertainty: **{result['uncertainty_months']} months**")
             st.success(f"Development Stage: **{result['development_stage']}**")

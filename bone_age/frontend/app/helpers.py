@@ -27,7 +27,7 @@ def normalize_to_uint8(image):
 
 @st.cache_resource
 def get_model():
-    model_path = Path(__file__).resolve().parent.parent.parent / "best_bone_age_model.pth" 
+    model_path = Path(__file__).resolve().parent.parent.parent.parent / "checkpoint_epoch_51.pth" 
     model, device = load_model(str(model_path))
     return model, device
 
