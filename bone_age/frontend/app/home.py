@@ -7,6 +7,10 @@ def main_ui():
     st.title("Bone-Ager")
     st.subheader("An automatic paediatric bone age assessment tool")
 
+    st.text_input("What is the patient's name?", key="patient_name")
+
+    st.text_input("What is the patient ID?", key="patient_id")
+
     option = st.selectbox('What is the sex?', ('Female', 'Male', 'Unknown'))
     st.write('You selected:', option)
         

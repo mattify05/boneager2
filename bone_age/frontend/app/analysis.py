@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import time
 
-from app.helpers import normalize_to_uint8, estimate_bone_age, get_data, convert_for_download
+from app import helpers
 
 def display():
     uploaded_file = st.session_state.get("uploaded_file")
@@ -38,22 +38,37 @@ def display():
 
             # Get image data and normalize
             image = dicom_data.pixel_array
-            image = normalize_to_uint8(image)
+            image = helpers.normalize_to_uint8(image)
 
             st.image(image, caption="DICOM Image Preview", use_container_width=True)
 
         else:
-            image = Image.open(uploaded_file)
-            st.image(image, caption="Image Preview", use_container_width=True)
-            image = np.array(image)  # convert for processing
+            col1, col2, col3 = st.columns([2, 3, 2])
+            with col1:
+                image = Image.open(uploaded_file)
+                st.image(image, caption="Image Preview", use_container_width=True)
+                image = np.array(image)  # convert for processing
+        
+        with col2:
+            patient_name = st.session_state.get("patient_name", "Unknown")
+            st.write(f"Patient Name: **{patient_name}**")
 
-        # Bone age estimation (placeholder)
-        bone_age = estimate_bone_age(image)
-        st.success(f"Estimated Bone Age: {bone_age} years")
+            patient_id = st.session_state.get("patient_id", "N/A")
+            st.write(f"Patient ID: **{patient_id}**")
+
+        with col3:
+            uploaded_file.seek(0)  # reset pointer before reading again
+            image = helpers.decode_image(uploaded_file.read())
+            result = helpers.estimate_bone_age(image)
+
+            st.success(f"Estimated Bone Age: **{result['predicted_age_months']} months ({result['predicted_age_years']} years)**")
+            st.success(f"Confidence: **{result['confidence']}**")
+            st.success(f"Uncertainty: **{result['uncertainty_months']} months**")
+            st.success(f"Development Stage: **{result['development_stage']}**")
 
     # converts the data to csv for download and implements the download button 
-    df = get_data()
-    csv = convert_for_download(df)
+    df = helpers.get_data()
+    csv = helpers.convert_for_download(df)
 
     st.download_button(
         label="Download CSV",

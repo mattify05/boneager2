@@ -61,7 +61,7 @@ def load_model(model_path='best_bone_age_model.pth'):
     print(f"Using device: {device}")
     
     model = BoneAgeModel()
-    checkpoint = torch.load(model_path, map_location=device)
+    checkpoint = torch.load(model_path, map_location=device, weights_only=False)
     
     # Handle models that were trained with gender head
     model_state = checkpoint['model_state_dict']
