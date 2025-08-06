@@ -15,6 +15,8 @@ def display():
     if not uploaded_file:
         return
 
+    results = []
+
     for index, uploaded_file in enumerate(uploaded_file):
         st.success(f"file {index + 1}: {uploaded_file.name} uploaded successfully!")
         file_ext = uploaded_file.name.lower().split('.')[-1]
@@ -29,6 +31,8 @@ def display():
         
         st.write('...and now we\'re done!')
 
+        col1, col2, col3 = st.columns([2, 3, 2])
+
         if file_ext == "dcm":
             # Load and anonymize DICOM
             dicom_data = pydicom.dcmread(uploaded_file)
@@ -39,15 +43,29 @@ def display():
             # Get image data and normalize
             image = dicom_data.pixel_array
             image = helpers.normalize_to_uint8(image)
-
-            st.image(image, caption="DICOM Image Preview", use_container_width=True)
+            
+            with col1: 
+                st.image(image, caption="DICOM Image Preview", use_container_width=True)
+            
+            uploaded_file.seek(0)
+            image_bytes = uploaded_file.read()
+            image = helpers.decode_image(image_bytes)
+            # result = helpers.estimate_bone_age(image)
 
         else:
-            col1, col2, col3 = st.columns([2, 3, 2])
             with col1:
                 image = Image.open(uploaded_file)
                 st.image(image, caption="Image Preview", use_container_width=True)
                 image = np.array(image)  # convert for processing
+        
+        patient_name = st.session_state.get("patient_name", f"Patient {index + 1}")
+        patient_id = st.session_state.get("patient_id", f"ID_{index + 1}")
+
+        result = helpers.estimate_bone_age(image)
+
+        result["patient_name"] = patient_name
+        result["patient_id"] = patient_id
+        results.append(result)
         
         with col2:
             patient_name = st.session_state.get("patient_name", "Unknown")
@@ -62,20 +80,21 @@ def display():
             result = helpers.estimate_bone_age(image)
 
             st.success(f"Estimated Bone Age: **{result['predicted_age_months']} months ({result['predicted_age_years']} years)**")
-            st.success(f"Confidence: **{result['confidence']}**")
+            st.success(f"Confidence: **{result['confidence'] * 100:.2f}%**")
             st.success(f"Uncertainty: **{result['uncertainty_months']} months**")
             st.success(f"Development Stage: **{result['development_stage']}**")
-
+        
     # converts the data to csv for download and implements the download button 
-    df = helpers.get_data()
-    csv = helpers.convert_for_download(df)
-
-    st.download_button(
-        label="Download CSV",
-        data=csv,
-        file_name="data.csv",
-        mime="text/csv",
-        icon=":material/download:",
-    )
+    if results:
+        df = pd.DataFrame(results)
+        csv = helpers.convert_for_download(df)
+        
+        st.download_button(
+            label="Download CSV",
+            data=csv,
+            file_name="data.csv",
+            mime="text/csv",
+            icon=":material/download:",
+        )
 
 

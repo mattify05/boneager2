@@ -7,6 +7,7 @@ import tempfile
 import cv2
 from PIL import Image
 import io
+import csv
 
 import sys
 from pathlib import Path
@@ -27,7 +28,7 @@ def normalize_to_uint8(image):
 
 @st.cache_resource
 def get_model():
-    model_path = Path(__file__).resolve().parent.parent.parent / "best_bone_age_model.pth" 
+    model_path = Path(__file__).resolve().parent.parent.parent.parent / "checkpoint_epoch_51.pth" 
     model, device = load_model(str(model_path))
     return model, device
 
@@ -49,8 +50,13 @@ def estimate_bone_age(image_array):
 
 def decode_image(uploaded_file_bytes):
     """Converts uploaded image bytes into a NumPy array (OpenCV format)."""
-    image = Image.open(io.BytesIO(uploaded_file_bytes)).convert("RGB")
-    return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+    if not uploaded_file_bytes:
+        raise ValueError("Uploaded file is empty.")
+    try:
+        image = Image.open(io.BytesIO(uploaded_file_bytes)).convert("RGB")
+        return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+    except:
+        raise ValueError("Uploaded file is not a valid image.")
 
 def get_data():
     df = pd.DataFrame(
@@ -67,3 +73,18 @@ def convert_for_download(df):
 def reset_analysis():
     if "analysis_done" in st.session_state:
         del st.session_state["analysis_done"]
+
+def save_results_to_csv(results, filename="bone_age_results.csv"):
+    keys = results[0].keys()
+
+    with open(filename, mode="w", newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=keys)
+        writer.writeheader()
+        writer.writerows(results)
+
+def batch_process_images(image_arrays):
+    results = []
+    for image in image_arrays:
+        result = estimate_bone_age(image)
+        results.append(result)
+    return results
