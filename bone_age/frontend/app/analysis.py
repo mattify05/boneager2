@@ -6,7 +6,6 @@ import pydicom
 from PIL import Image
 import numpy as np
 import pandas as pd
-import time
 
 from app import helpers
 
@@ -21,15 +20,10 @@ def display():
         st.success(f"file {index + 1}: {uploaded_file.name} uploaded successfully!")
         file_ext = uploaded_file.name.lower().split('.')[-1]
 
-        st.write(f"Starting analysis for file {index + 1}...")
-        latest_iteration = st.empty()
-        bar = st.progress(0)
+        progress_placeholder = st.empty()
+        image_placeholder = st.empty()
 
-        for i in range(100):
-            bar.progress(i + 1)
-            time.sleep(0.1)
-        
-        st.write('...and now we\'re done!')
+        bar = st.progress(0, text="Starting analysis...")
 
         col1, col2, col3 = st.columns([2, 3, 2])
 
@@ -43,7 +37,7 @@ def display():
             # Get image data and normalize
             image = dicom_data.pixel_array
             image = helpers.normalize_to_uint8(image)
-            
+
             with col1: 
                 st.image(image, caption="DICOM Image Preview", use_container_width=True)
             
@@ -58,10 +52,16 @@ def display():
                 st.image(image, caption="Image Preview", use_container_width=True)
                 image = np.array(image)  # convert for processing
         
+        result = helpers.progress_using_threads(
+            image_array=image,
+            estimate_fn=helpers.estimate_bone_age,
+            progress_callback=lambda p: bar.progress(p, text="Analysing...")
+        )
+
+        st.success("Analysis complete.")
+        
         patient_name = st.session_state.get("patient_name", f"Patient {index + 1}")
         patient_id = st.session_state.get("patient_id", f"ID_{index + 1}")
-
-        result = helpers.estimate_bone_age(image)
 
         result["patient_name"] = patient_name
         result["patient_id"] = patient_id
@@ -77,11 +77,11 @@ def display():
         with col3:
             uploaded_file.seek(0)  # reset pointer before reading again
             image = helpers.decode_image(uploaded_file.read())
-            result = helpers.estimate_bone_age(image)
-
+            # result = helpers.estimate_bone_age(image)
+  
             st.success(f"Estimated Bone Age: **{result['predicted_age_months']} months ({result['predicted_age_years']} years)**")
             st.success(f"Confidence: **{result['confidence'] * 100:.2f}%**")
-            st.success(f"Uncertainty: **{result['uncertainty_months']} months**")
+            st.success(f"Uncertainty: **± {result['uncertainty_months']} months**")
             st.success(f"Development Stage: **{result['development_stage']}**")
         
     # converts the data to csv for download and implements the download button 
@@ -90,9 +90,9 @@ def display():
         csv = helpers.convert_for_download(df)
         
         st.download_button(
-            label="Download CSV",
+            label="Download results as CSV",
             data=csv,
-            file_name="data.csv",
+            file_name="bone_age_results.csv",
             mime="text/csv",
             icon=":material/download:",
         )

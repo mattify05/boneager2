@@ -8,6 +8,8 @@ import cv2
 from PIL import Image
 import io
 import csv
+import threading
+import time
 
 import sys
 from pathlib import Path
@@ -88,3 +90,23 @@ def batch_process_images(image_arrays):
         result = estimate_bone_age(image)
         results.append(result)
     return results
+
+def progress_using_threads(image_array, estimate_fn, progress_callback=None):
+    result_container = {"result": None}
+
+    def run_analysis(image_array, container):
+        container["result"] = estimate_bone_age(image_array)
+    
+    thread = threading.Thread(target=run_analysis, args=(image_array, result_container))
+    thread.start()
+
+    progress = 0
+    while thread.is_alive():
+        time.sleep(0.1)
+        progress = min(progress + 2, 100)
+        if progress_callback:
+            progress_callback(progress)
+    if progress_callback:
+        progress_callback(100)
+
+    return result_container["result"]
