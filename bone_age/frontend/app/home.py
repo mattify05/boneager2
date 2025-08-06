@@ -23,3 +23,6 @@ def main_ui():
 
     if uploaded:
         st.session_state.uploaded_file = uploaded
+    else:
+        if "uploaded_file" in st.session_state:
+            del st.session_state["uploaded_file"]
