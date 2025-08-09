@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import streamlit as st
-import streamlit_permalink as stp
 import pydicom
 from PIL import Image
 import numpy as np
@@ -14,87 +13,101 @@ def display():
     if not uploaded_file:
         return
 
-    results = []
+    if not isinstance(uploaded_file, list):
+        uploaded_files = [uploaded_file]
+    else:
+        uploaded_files = uploaded_file
 
-    for index, uploaded_file in enumerate(uploaded_file):
-        st.success(f"file {index + 1}: {uploaded_file.name} uploaded successfully!")
-        file_ext = uploaded_file.name.lower().split('.')[-1]
+    if "metadata_submitted" not in st.session_state:
+        st.session_state.metadata_submitted = False
 
-        progress_placeholder = st.empty()
-        image_placeholder = st.empty()
+    # Show metadata inputs always, prefilled from session_state or empty string
+    with st.form("metadata_form"):
+        for i, uploaded_file in enumerate(uploaded_files):
+            st.write(f"**Metadata for file {i + 1}**: {uploaded_file.name}")
+            # Use get with default empty string so inputs are persistent
+            name_val = st.session_state.get(f"name_{i}", "")
+            id_val = st.session_state.get(f"id_{i}", "")
+            sex_val = st.session_state.get(f"sex_{i}", "Unknown")
 
-        bar = st.progress(0, text="Starting analysis...")
+            # Show inputs with values
+            name = st.text_input(f"Patient Name #{i + 1}", value=name_val, key=f"name_{i}")
+            pid = st.text_input(f"Patient ID #{i + 1}", value=id_val, key=f"id_{i}")
+            sex = st.selectbox(f"Sex #{i + 1}", options=["Female", "Male", "Unknown"], index=["Female", "Male", "Unknown"].index(sex_val), key=f"sex_{i}")
 
-        col1, col2, col3 = st.columns([2, 3, 2])
+        submitted = st.form_submit_button("Submit")
 
-        if file_ext == "dcm":
-            # Load and anonymize DICOM
-            dicom_data = pydicom.dcmread(uploaded_file)
-            for tag in ["PatientName", "PatientID", "PatientBirthDate"]:
-                if tag in dicom_data:
-                    dicom_data.data_element(tag).value = ""
+    if submitted:
+        st.session_state.metadata_submitted = True
+        st.session_state.analysis_done = False
 
-            # Get image data and normalize
-            image = dicom_data.pixel_array
-            image = helpers.normalize_to_uint8(image)
+    # Run analysis only if submitted and not already done
+    if st.session_state.metadata_submitted and not st.session_state.get("analysis_done", False):
+        results = []
+        for index, uploaded_file in enumerate(uploaded_files):
+            file_ext = uploaded_file.name.lower().split('.')[-1]
 
-            with col1: 
-                st.image(image, caption="DICOM Image Preview", use_container_width=True)
-            
-            uploaded_file.seek(0)
-            image_bytes = uploaded_file.read()
-            image = helpers.decode_image(image_bytes)
-            # result = helpers.estimate_bone_age(image)
+            bar = st.progress(0, text="Starting analysis...")
 
-        else:
-            with col1:
-                image = Image.open(uploaded_file)
-                st.image(image, caption="Image Preview", use_container_width=True)
-                image = np.array(image)  # convert for processing
-        
-        result = helpers.progress_using_threads(
-            image_array=image,
-            estimate_fn=helpers.estimate_bone_age,
-            progress_callback=lambda p: bar.progress(p, text="Analysing...")
-        )
+            col1, col2, col3 = st.columns([2, 3, 2])
 
-        st.success("Analysis complete.")
-        
-        patient_name = st.session_state.get("patient_name", f"Patient {index + 1}")
-        patient_id = st.session_state.get("patient_id", f"ID_{index + 1}")
+            if file_ext == "dcm":
+                dicom_data = pydicom.dcmread(uploaded_file)
+                for tag in ["PatientName", "PatientID", "PatientBirthDate"]:
+                    if tag in dicom_data:
+                        dicom_data.data_element(tag).value = ""
 
-        result["patient_name"] = patient_name
-        result["patient_id"] = patient_id
-        results.append(result)
-        
-        with col2:
-            patient_name = st.session_state.get("patient_name", "Unknown")
-            st.write(f"Patient Name: **{patient_name}**")
+                image = dicom_data.pixel_array
+                image = helpers.normalize_to_uint8(image)
 
-            patient_id = st.session_state.get("patient_id", "N/A")
-            st.write(f"Patient ID: **{patient_id}**")
+                with col1:
+                    st.image(image, caption="DICOM Image Preview", use_container_width=True)
 
-        with col3:
-            uploaded_file.seek(0)  # reset pointer before reading again
-            image = helpers.decode_image(uploaded_file.read())
-            # result = helpers.estimate_bone_age(image)
-  
-            st.success(f"Estimated Bone Age: **{result['predicted_age_months']} months ({result['predicted_age_years']} years)**")
-            st.success(f"Confidence: **{result['confidence'] * 100:.2f}%**")
-            st.success(f"Uncertainty: **± {result['uncertainty_months']} months**")
-            st.success(f"Development Stage: **{result['development_stage']}**")
-        
-    # converts the data to csv for download and implements the download button 
-    if results:
-        df = pd.DataFrame(results)
-        csv = helpers.convert_for_download(df)
-        
-        st.download_button(
-            label="Download results as CSV",
-            data=csv,
-            file_name="bone_age_results.csv",
-            mime="text/csv",
-            icon=":material/download:",
-        )
+                uploaded_file.seek(0)
 
+            else:
+                with col1:
+                    image = Image.open(uploaded_file)
+                    st.image(image, caption="Image Preview", use_container_width=True)
+                    image = np.array(image)
 
+            result = helpers.progress_using_threads(
+                image_array=image,
+                estimate_fn=helpers.estimate_bone_age,
+                progress_callback=lambda p: bar.progress(p, text="Analysing...")
+            )
+
+            st.success("Analysis complete.")
+
+            # Metadata from session_state (inputs are stored automatically)
+            patient_name = st.session_state.get(f"name_{index}", f"Patient {index + 1}")
+            patient_id = st.session_state.get(f"id_{index}", f"ID_{index + 1}")
+            sex = st.session_state.get(f"sex_{index}", "Unknown")
+
+            result["patient_name"] = patient_name
+            result["patient_id"] = patient_id
+            result["sex"] = sex
+            results.append(result)
+
+            with col2:
+                st.write(f"Patient Name: **{patient_name}**")
+                st.write(f"Patient ID: **{patient_id}**")
+                st.write(f"Sex: **{sex}**")
+
+            with col3:
+                st.success(f"Estimated Bone Age: **{result['predicted_age_months']} months ({result['predicted_age_years']} years)**")
+                st.success(f"Confidence: **{result['confidence'] * 100:.2f}%**")
+                st.success(f"Uncertainty: **± {result['uncertainty_months']} months**")
+                st.success(f"Development Stage: **{result['development_stage']}**")
+
+        if results:
+            df = pd.DataFrame(results)
+            csv = helpers.convert_for_download(df)
+            st.download_button(
+                label="Download results as CSV",
+                data=csv,
+                file_name="bone_age_results.csv",
+                mime="text/csv",
+                icon=":material/download:",
+            )
+        st.session_state.analysis_done = True
