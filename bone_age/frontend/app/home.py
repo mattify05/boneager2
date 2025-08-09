@@ -7,19 +7,44 @@ def main_ui():
     st.title("Bone-Ager")
     st.subheader("An automatic paediatric bone age assessment tool")
 
-    st.text_input("What is the patient's name?", key="patient_name")
+    st.markdown(
+        """
+        #### :bone: How to Use Bone-Ager
 
-    st.text_input("What is the patient ID?", key="patient_id")
+        1. **Upload** one or more X-ray images (JPEG, PNG, or DICOM).
+        2. **Enter patient details** for each image
+        3. **Submit** the details to start the automatic analysis.
+        4. **Review** your results on-screen.
+        5. **Download** a detailed report whenever you want.
 
-    option = st.selectbox('What is the sex?', ('Female', 'Male', 'Unknown'))
-    st.write('You selected:', option)
-        
+        > Note: *If you prefer not to provide patient info, just skip it — the analysis will 
+        still run smoothly based on the images, though it is highly recommended to provide the sex
+        for the most accurate results.*
+        """
+    )
+
+    if "upload_count" not in st.session_state:
+        st.session_state.upload_count = 0
+
     uploaded = st.file_uploader(
         "Upload X-ray image (JPEG, JPG, PNG, or DICOM)", 
         type=["jpeg", "jpg", "png", "dcm"],
         accept_multiple_files=True,
+        key=f"uploader_{st.session_state.upload_count}",
         on_change=helpers.reset_analysis
     )
 
     if uploaded:
         st.session_state.uploaded_file = uploaded
+        st.session_state.analysis_done = False
+
+        st.info(
+            "Files uploaded successfully! Please fill out the patient metadata form below "
+            "and then submit to start the bone age analysis"
+        )
+    else:
+        if "uploaded_file" in st.session_state:
+            del st.session_state["uploaded_file"]
+            st.session_state.analysis_done = False
+    
+
