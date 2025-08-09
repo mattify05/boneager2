@@ -48,7 +48,8 @@ To get started with bone processing, type the following into your terminal:
 cd bone_age/frontend
 streamlit run main.py
 ```
-
+- Bone-ager works off the pytorch library, while this is software is compatable with windows, mac and linux, there
+  will be slighlty different bone age predictions based on the computer and software system used for each user
 Next,
 ---
 
