@@ -115,7 +115,9 @@ def display():
 
       # Show "Analyze another image" button after analysis is done
     if st.session_state.get("analysis_done", False):
-        if st.button("Analyse another image"):
+        st.write("")
+        st.write("Ready to analyse another X-ray? :point_down:")
+        if st.button("Start New Analysis"):
             # Clear session state related to files and analysis
             for key in ["uploaded_file", "metadata_submitted", "analysis_done"]:
                 if key in st.session_state:
