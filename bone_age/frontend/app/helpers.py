@@ -76,6 +76,7 @@ def reset_analysis():
     if "analysis_done" in st.session_state:
         del st.session_state["analysis_done"]
 
+# Writes the bone age results to a CSV file (bone_age_results.csv)
 def save_results_to_csv(results, filename="bone_age_results.csv"):
     keys = results[0].keys()
 
@@ -84,6 +85,7 @@ def save_results_to_csv(results, filename="bone_age_results.csv"):
         writer.writeheader()
         writer.writerows(results)
 
+# appends the results of each image to the results list and returns it 
 def batch_process_images(image_arrays):
     results = []
     for image in image_arrays:
@@ -91,6 +93,7 @@ def batch_process_images(image_arrays):
         results.append(result)
     return results
 
+# Uses threads to allow for concurrent execution of code to speed up analysis
 def progress_using_threads(image_array, estimate_fn, progress_callback=None):
     result_container = {"result": None}
 
