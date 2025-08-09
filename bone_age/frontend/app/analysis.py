@@ -40,16 +40,20 @@ def display():
     if submitted:
         st.session_state.metadata_submitted = True
         st.session_state.analysis_done = False
+        # Clear previous results when resubmitting
+        if "analysis_results" in st.session_state:
+            del st.session_state.analysis_results
 
-    # Run analysis only if submitted and not already done
-    if st.session_state.metadata_submitted and not st.session_state.get("analysis_done", False):
+    # only runs analysis if submitted and not already done and no results exist
+    if (st.session_state.metadata_submitted and 
+        not st.session_state.get("analysis_done", False) and 
+        "analysis_results" not in st.session_state):
+        
         results = []
         for index, uploaded_file in enumerate(uploaded_files):
             file_ext = uploaded_file.name.lower().split('.')[-1]
 
             bar = st.progress(0, text="Starting analysis...")
-
-            col1, col2, col3 = st.columns([2, 3, 2])
 
             if file_ext == "dcm":
                 dicom_data = pydicom.dcmread(uploaded_file)
@@ -59,19 +63,12 @@ def display():
 
                 image = dicom_data.pixel_array
                 image = helpers.normalize_to_uint8(image)
-
-                with col1:
-                    st.image(image, caption="DICOM Image Preview", use_container_width=True)
-
                 uploaded_file.seek(0)
-
             else:
-                with col1:
-                    image = Image.open(uploaded_file)
-                    st.image(image, caption="Image Preview", use_container_width=True)
-                    image = np.array(image)
+                image = Image.open(uploaded_file)
+                image = np.array(image)
 
-            sex_mapped = helpers.map_sex_format(sex)
+            sex_mapped = helpers.map_sex_format(st.session_state.get(f"sex_{index}", "Unknown"))
 
             result = helpers.progress_using_threads(
                 image_array=image,
@@ -91,35 +88,55 @@ def display():
             result["sex"] = sex
             results.append(result)
 
+        st.session_state.analysis_results = results
+        st.session_state.analysis_done = True
+        st.rerun()  # Force a rerun to display results
+
+    if "analysis_results" in st.session_state:
+        results = st.session_state.analysis_results
+        
+        for index, result in enumerate(results):
+            col1, col2, col3 = st.columns([2, 3, 2])
+            
+            uploaded_file = uploaded_files[index]
+            file_ext = uploaded_file.name.lower().split('.')[-1]
+            
+            with col1:
+                if file_ext == "dcm":
+                    dicom_data = pydicom.dcmread(uploaded_file)
+                    image = dicom_data.pixel_array
+                    image = helpers.normalize_to_uint8(image)
+                    st.image(image, caption="DICOM Image Preview", use_container_width=True)
+                else:
+                    image = Image.open(uploaded_file)
+                    st.image(image, caption="Image Preview", use_container_width=True)
+
             with col2:
-                st.write(f"Patient Name: **{patient_name}**")
-                st.write(f"Patient ID: **{patient_id}**")
-                st.write(f"Sex: **{sex}**")
+                st.write(f"Patient Name: **{result['patient_name']}**")
+                st.write(f"Patient ID: **{result['patient_id']}**")
+                st.write(f"Sex: **{result['sex']}**")
 
             with col3:
                 st.success(f"Estimated Bone Age: **{result['predicted_age_months']} months ({result['predicted_age_years']} years)**")
                 st.success(f"Confidence: **{result['confidence'] * 100:.2f}%**")
                 st.success(f"Uncertainty: **± {result['uncertainty_months']} months**")
 
-        if results:
-            df = pd.DataFrame(results)
-            csv = helpers.convert_for_download(df)
-            st.download_button(
-                label="Download results as CSV",
-                data=csv,
-                file_name="bone_age_results.csv",
-                mime="text/csv",
-                icon=":material/download:",
-            )
-        st.session_state.analysis_done = True
+        # Download button
+        df = pd.DataFrame(results)
+        csv = helpers.convert_for_download(df)
+        st.download_button(
+            label="Download results as CSV",
+            data=csv,
+            file_name="bone_age_results.csv",
+            mime="text/csv",
+            icon=":material/download:",
+        )
 
-      # Show "Analyze another image" button after analysis is done
-    if st.session_state.get("analysis_done", False):
         st.write("")
         st.write("Ready to analyse another X-ray? :point_down:")
         if st.button("Start New Analysis"):
             # Clear session state related to files and analysis
-            for key in ["uploaded_file", "metadata_submitted", "analysis_done"]:
+            for key in ["uploaded_file", "metadata_submitted", "analysis_done", "analysis_results"]:
                 if key in st.session_state:
                     del st.session_state[key]
             # Increment upload_count to reset uploader widget
