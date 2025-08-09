@@ -17,14 +17,20 @@ def main_ui():
         4. **Review** your results on-screen.
         5. **Download** a detailed report whenever you want.
 
-        > Note: *If you prefer not to provide patient info, just skip it — the analysis will still run smoothly based on the images.*
+        > Note: *If you prefer not to provide patient info, just skip it — the analysis will 
+        still run smoothly based on the images, though it is highly recommended to provide the sex
+        for the most accurate results.*
         """
     )
+
+    if "upload_count" not in st.session_state:
+        st.session_state.upload_count = 0
 
     uploaded = st.file_uploader(
         "Upload X-ray image (JPEG, JPG, PNG, or DICOM)", 
         type=["jpeg", "jpg", "png", "dcm"],
         accept_multiple_files=True,
+        key=f"uploader_{st.session_state.upload_count}",
         on_change=helpers.reset_analysis
     )
 
@@ -40,4 +46,5 @@ def main_ui():
         if "uploaded_file" in st.session_state:
             del st.session_state["uploaded_file"]
             st.session_state.analysis_done = False
+    
 

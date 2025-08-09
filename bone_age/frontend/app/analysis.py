@@ -71,9 +71,11 @@ def display():
                     st.image(image, caption="Image Preview", use_container_width=True)
                     image = np.array(image)
 
+            sex_mapped = helpers.map_sex_format(sex)
+
             result = helpers.progress_using_threads(
                 image_array=image,
-                estimate_fn=helpers.estimate_bone_age,
+                estimate_fn=lambda img: helpers.estimate_bone_age(img, gender=sex_mapped, use_tta=True),
                 progress_callback=lambda p: bar.progress(p, text="Analysing...")
             )
 
@@ -98,7 +100,6 @@ def display():
                 st.success(f"Estimated Bone Age: **{result['predicted_age_months']} months ({result['predicted_age_years']} years)**")
                 st.success(f"Confidence: **{result['confidence'] * 100:.2f}%**")
                 st.success(f"Uncertainty: **± {result['uncertainty_months']} months**")
-                st.success(f"Development Stage: **{result['development_stage']}**")
 
         if results:
             df = pd.DataFrame(results)
@@ -111,3 +112,14 @@ def display():
                 icon=":material/download:",
             )
         st.session_state.analysis_done = True
+
+      # Show "Analyze another image" button after analysis is done
+    if st.session_state.get("analysis_done", False):
+        if st.button("Analyse another image"):
+            # Clear session state related to files and analysis
+            for key in ["uploaded_file", "metadata_submitted", "analysis_done"]:
+                if key in st.session_state:
+                    del st.session_state[key]
+            # Increment upload_count to reset uploader widget
+            st.session_state.upload_count += 1
+            st.rerun()

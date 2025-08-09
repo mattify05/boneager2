@@ -2,7 +2,6 @@
 
 import streamlit as st
 import numpy as np
-import pandas as pd
 import tempfile
 import cv2
 from PIL import Image
@@ -18,7 +17,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 sys.path.append(str(BASE_DIR))
 
-from simple_predict import load_model, predict_bone_age
+from predictor import FlexibleBoneAgePredictor
 
 # Utility: normalize pixel values to 0-255 for display
 def normalize_to_uint8(image):
@@ -28,30 +27,46 @@ def normalize_to_uint8(image):
     image = 255 * (image - np.min(image)) / (np.max(image) - np.min(image))
     return image.astype(np.uint8)
 
+# Accesses the best_bone_age_model.pth file
 @st.cache_resource
-def get_model():
-    model_path = Path(__file__).resolve().parent.parent.parent.parent / "checkpoint_epoch_51.pth" 
-    model, device = load_model(str(model_path))
-    return model, device
+def get_predictor():
+    model_path = Path(__file__).resolve().parent.parent.parent / "best_bone_age_model.pth"
+    predictor = FlexibleBoneAgePredictor(str(model_path))
+    return predictor
 
-def estimate_bone_age(image_array):
+# Uses the get_predictor helper function to load the model and return the pretrained
+# bone age prediction results
+def estimate_bone_age(image_array, gender=None, use_tta=True):
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
         temp_path = tmp.name
         cv2.imwrite(temp_path, image_array)
+
+    predictor = get_predictor()
+    result = predictor.predict_single_image(temp_path, gender=gender, use_tta=use_tta)
+
+    if isinstance(result, list):
+        result = result[0]
     
-    model, device = get_model()
-
-    result = predict_bone_age(temp_path, model, device, monte_carlo_samples=5)
     return {
-        'predicted_age_months': round(result['age_months'], 1),
-        'predicted_age_years': round(result['age_years'], 1),
-        'confidence': round(result['confidence'], 2),
-        'uncertainty_months': round(result['uncertainty'], 1),
-        'development_stage': result['stage']
-    }  
+        "predicted_age_months": round(result.predicted_age_months, 1),
+        "predicted_age_years": round(result.predicted_age_years, 1),
+        "confidence": round(result.confidence_score, 2),
+        "uncertainty_months": round(result.uncertainty, 1)
+    }
 
+# Maps the sex (female, male, unknown) to an integer (0, 1, None) respectively for
+# the model to interpret
+def map_sex_format(sex_str):
+    sex_str = sex_str.lower()
+    if sex_str == 'female':
+        return 0
+    elif sex_str == 'male':
+        return 1
+    else:
+        return None
+
+# Converts uploaded image bytes to a numpy array 
 def decode_image(uploaded_file_bytes):
-    """Converts uploaded image bytes into a NumPy array (OpenCV format)."""
     if not uploaded_file_bytes:
         raise ValueError("Uploaded file is empty.")
     try:
@@ -59,12 +74,6 @@ def decode_image(uploaded_file_bytes):
         return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
     except:
         raise ValueError("Uploaded file is not a valid image.")
-
-def get_data():
-    df = pd.DataFrame(
-        np.random.randn(50, 20), columns=("col %d" % i for i in range(20))
-    )
-    return df
 
 # Converts the dataframe to a csv file, so it can be downloaded
 @st.cache_data
