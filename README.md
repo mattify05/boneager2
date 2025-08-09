@@ -33,7 +33,8 @@ pip install -r requirements.txt
 ## Usage
 After setting up the code on VSCode, head over to [**this link**](www.google.com) to download the BoneAger model.
 Once it is installed, drag it from your Applications / Downloads folder into the
-bone_age directory contained in your GitHub repo. Below are a few images that can
+bone_age directory contained in your GitHub repo. You will also need to download the model separately and replace
+the model (called best_bone_age_model.pth) in your bone_age directory. Below are a few images that can
 show you how to do this:
 
 (image1)
