@@ -6,10 +6,10 @@
 
 ## :mag_right: Key Features 
 
-- **Uses a trained model:** Highly accurate bone age prediction using the RSNA database
-- **Fast inference time:** Returns results in under 5 seconds 
+- **Trained ML model:** High accuracy bone age prediction using the RSNA database
+- **Fast results:** Inference time in under 5 seconds 
 - **Local Execution:** Runs offline on desktop computers, without requiring internet connection 
-- **User-friendly interface:** With a simple design to enhance the workflow for clinicians 
+- **User-friendly interface:** Simple design to enhance the workflow for clinicians 
 
 ---
 
@@ -31,26 +31,25 @@ pip install -r requirements.txt
 ```
 
 ## Usage
-After setting up the code on VSCode, head over to [**this link**](www.google.com) to download the BoneAger model.
-Once it is installed, drag it from your Applications / Downloads folder into the
-bone_age directory contained in your GitHub repo. You will also need to download the model separately and replace
-the model (called best_bone_age_model.pth) in your bone_age directory. Below are a few images that can
-show you how to do this:
+### 1. Download the Bone-Ager model
+- Download our pre-trained model from [this link](https://github.com/jjjaden-hash/DESN2000-BINF-M13B_GAMMA/blob/main/bone_age/best_bone_age_model.pth).
+- Locate the file in your **Downloads** folder - it should be named _best_bone_age_model.pth_
+- Drag this file to the cloned repository into the **bone_age** directory and replace the current model with the newly downloaded one.
 
 (image1)
 
 (image2)
 
 (image3)
-
+### 2. Runninng Bone-Ager
 To get started with bone processing, type the following into your terminal:
 ```bash
 cd bone_age/frontend
 streamlit run main.py
 ```
-- Bone-ager works off the pytorch library, while this is software is compatable with windows, mac and linux, there
-  will be slighlty different bone age predictions based on the computer and software system used for each user
-Next,
+- Note: Bone-ager uses the PyTorch library for machine learning. While this software is compatible with Windows, macOS and Linux, there
+  will be slight variations in bone age predictions due to the different hardware and software system configurations for each user
+
 ---
 
 ## :bulb: Credits
