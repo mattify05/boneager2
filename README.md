@@ -42,7 +42,7 @@ pip install -r requirements.txt
 ![Drag and drop the downloaded model file to the bone_age directory](https://github.com/user-attachments/assets/1f3c6e26-c075-48da-b5c9-e726acabc0e4)
 
 
-### 2. Runninng Bone-Ager
+### 2. Running Bone-Ager
 To get started with bone processing, type the following into your terminal:
 ```bash
 cd bone_age/frontend
