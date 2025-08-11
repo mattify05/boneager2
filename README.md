@@ -39,7 +39,7 @@ pip install -r requirements.txt
 - Locate the file in your **Downloads** folder - it should be named _best_bone_age_model.pth_ 
 - Drag this file to the cloned repository into the **bone_age** directory and replace the current model with the newly downloaded one.
   
-![Drag and drop the downloaded model file to the bone_age directory](https://github.com/user-attachments/assets/c9def3c3-878c-4d23-a6c0-d0aa341186a6)
+![Drag and drop the downloaded model file to the bone_age directory](https://github.com/user-attachments/assets/1f3c6e26-c075-48da-b5c9-e726acabc0e4)
 
 
 ### 2. Runninng Bone-Ager
