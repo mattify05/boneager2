@@ -9,6 +9,7 @@ import pandas as pd
 from app import helpers
 from dataclasses import asdict
 from bone_age.predictor import PredictionResult
+import time
 
 def display():
     uploaded_file = st.session_state.get("uploaded_file")
@@ -57,12 +58,12 @@ def display():
 
             bar = st.progress(0, text="Starting analysis...")
 
+            # --- Load image (same as you had) ---
             if file_ext == "dcm":
                 dicom_data = pydicom.dcmread(uploaded_file)
                 for tag in ["PatientName", "PatientID", "PatientBirthDate"]:
                     if tag in dicom_data:
                         dicom_data.data_element(tag).value = ""
-
                 image = dicom_data.pixel_array
                 image = helpers.normalize_to_uint8(image)
                 uploaded_file.seek(0)
@@ -70,41 +71,61 @@ def display():
                 image = Image.open(uploaded_file)
                 image = np.array(image)
 
-            sex_mapped = helpers.map_sex_format(st.session_state.get(f"sex_{index}", "Unknown"))
+            # --- Get metadata from session (define BEFORE using later) ---
+            patient_name = st.session_state.get(f"name_{index}", f"Patient {index + 1}")
+            patient_id   = st.session_state.get(f"id_{index}", f"ID_{index + 1}")
+            sex_label    = st.session_state.get(f"sex_{index}", "Unknown")
 
-            result = helpers.progress_using_threads(
-                image_array=image,
-                estimate_fn=lambda img: helpers.estimate_bone_age(img, gender=sex_mapped, use_tta=True),
-                progress_callback=lambda p: bar.progress(p, text="Analysing...")
-            )
+            # --- Map sex to predictor input; force a single-output mode for UI ---
+            sex_for_pred = helpers.map_sex_format(sex_label)
+            if sex_for_pred in (None, "Unknown", "unknown"):
+                sex_for_pred = "average"  # ensures a single PredictionResult, not a list
+
+            # --- Small progress animation (keeps UI responsive) ---
+            for p in range(0, 101, 10):
+                time.sleep(0.01)
+                bar.progress(p, text="Analysing...")
+
+            # --- Call the estimator directly (no threads) ---
+            try:
+                result = helpers.estimate_bone_age(image, gender=sex_for_pred, use_tta=True)
+            except Exception as e:
+                st.error(f"Prediction failed: {e}")
+                return
 
             st.success("Analysis complete.")
 
-            # Metadata from session_state (inputs are stored automatically)
-            patient_name = st.session_state.get(f"name_{index}", f"Patient {index + 1}")
-            patient_id = st.session_state.get(f"id_{index}", f"ID_{index + 1}")
-            sex = st.session_state.get(f"sex_{index}", "Unknown")
-            #Normalizing result
-            if result is None:
-                st.error("Prediction failed: no result. Check the model path and image")
-                return
-            # If predictor sometimes returns a list (e.g., both genders), decide how to handle it:
+            # --- Normalize result to a dict your UI expects ---
+            # If predictor returns both genders somehow, pick the first
             if isinstance(result, list) and len(result) > 0:
-                # Pick one, or average; here we pick the first:
                 result = result[0]
 
-            # If it's a dataclass object, convert to dict
+            # Convert dataclass -> dict
             if isinstance(result, PredictionResult):
                 result = asdict(result)
 
-            # Guard: we now expect a dict
+            # Ensure we have a dict
             if not isinstance(result, dict):
                 st.error(f"Unexpected result type: {type(result)}")
                 return
+
+            # Harmonize key names used later in the UI
+            if "confidence" not in result and "confidence_score" in result:
+                result["confidence"] = result["confidence_score"]
+            if "uncertainty_months" not in result and "uncertainty" in result:
+                result["uncertainty_months"] = result["uncertainty"]
+
+            # Final guard
+            if result is None:
+                st.error("Prediction failed: no result. Check the model path and image")
+                return
+
+            # --- Attach metadata and store ---
             result["patient_name"] = patient_name
-            result["patient_id"] = patient_id
-            result["sex"] = sex
+            result["patient_id"]   = patient_id
+            result["sex"]          = sex_label
             results.append(result)
+
 
         st.session_state.analysis_results = results
         st.session_state.analysis_done = True
