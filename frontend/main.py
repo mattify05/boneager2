@@ -2,7 +2,11 @@
 
 import streamlit as st
 from app import home, analysis, login, about, contact
-from bone_age.predictor import load_model, predict_single_image
+from bone_age.predictor import FlexibleBoneAgePredictor
+
+predictor = FlexibleBoneAgePredictor(model_path="models/best_bone_age_model.pth", device="auto")
+
+
 
 if st.session_state.get("force_rerun"):
     del st.session_state["force_rerun"]

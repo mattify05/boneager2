@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd
 
 from app import helpers
+from dataclasses import asdict
+from bone_age.predictor import PredictionResult
 
 def display():
     uploaded_file = st.session_state.get("uploaded_file")
@@ -82,7 +84,23 @@ def display():
             patient_name = st.session_state.get(f"name_{index}", f"Patient {index + 1}")
             patient_id = st.session_state.get(f"id_{index}", f"ID_{index + 1}")
             sex = st.session_state.get(f"sex_{index}", "Unknown")
+            #Normalizing result
+            if result is None:
+                st.error("Prediction failed: no result. Check the model path and image")
+                return
+            # If predictor sometimes returns a list (e.g., both genders), decide how to handle it:
+            if isinstance(result, list) and len(result) > 0:
+                # Pick one, or average; here we pick the first:
+                result = result[0]
 
+            # If it's a dataclass object, convert to dict
+            if isinstance(result, PredictionResult):
+                result = asdict(result)
+
+            # Guard: we now expect a dict
+            if not isinstance(result, dict):
+                st.error(f"Unexpected result type: {type(result)}")
+                return
             result["patient_name"] = patient_name
             result["patient_id"] = patient_id
             result["sex"] = sex

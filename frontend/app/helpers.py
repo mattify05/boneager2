@@ -17,7 +17,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 sys.path.append(str(BASE_DIR))
 
-from predictor import FlexibleBoneAgePredictor
+from bone_age.predictor import FlexibleBoneAgePredictor
 
 # Utility: normalize pixel values to 0-255 for display
 def normalize_to_uint8(image):
