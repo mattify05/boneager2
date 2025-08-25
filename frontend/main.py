@@ -2,6 +2,7 @@
 
 import streamlit as st
 from app import home, analysis, login, about, contact
+from bone_age.predictor import load_model, predict_single_image
 
 if st.session_state.get("force_rerun"):
     del st.session_state["force_rerun"]

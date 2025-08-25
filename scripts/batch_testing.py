@@ -12,7 +12,7 @@ import glob
 
 # Import functions from simple_predict.py
 try:
-    from simple_predict import load_model, predict_bone_age
+    from bone_age.simple_predict import load_model, predict_bone_age
 except ImportError:
     print("❌ Error: Could not import from simple_predict.py")
     print("Make sure simple_predict.py is in the same directory as this script")
