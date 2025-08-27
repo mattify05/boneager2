@@ -10,6 +10,7 @@ Usage:
     py predictor_flexible.py
 """
 
+from pathlib import Path
 import torch
 import torch.nn as nn
 import torchvision.models as models
@@ -21,7 +22,37 @@ from typing import Dict, List, Optional, Union
 import os
 from dataclasses import dataclass
 import warnings
+import inspect
 warnings.filterwarnings('ignore')
+
+# Single source of truth for default relative location
+DEFAULT_MODEL_REL = Path("models") / "best_bone_age_model.pth"
+
+def _resolve_model_path(path_str: str | None) -> str:
+    # Priority: explicit arg → env var → default
+    env = os.getenv("BONEAGER_MODEL")
+    raw = path_str or env or str(DEFAULT_MODEL_REL)
+
+    p = Path(raw)
+    if p.is_absolute():
+        final = str(p)
+    else:
+        repo_root = Path(__file__).resolve().parents[1]
+        final = str((repo_root / p).resolve())
+
+    print(f"    resolved -> {final}")
+    return final
+
+_PREDICTOR_CACHE = {}
+
+def get_predictor(model_path: str | None = None, device: str = "auto") -> "FlexibleBoneAgePredictor":
+    #Actual code
+    resolved = _resolve_model_path(model_path)
+    key = (resolved, device)
+    if key not in _PREDICTOR_CACHE:
+        print(f"Using model: {resolved}")
+        _PREDICTOR_CACHE[key] = FlexibleBoneAgePredictor(model_path=resolved, device=device)
+    return _PREDICTOR_CACHE[key]
 
 @dataclass
 class PredictionResult:
@@ -90,11 +121,22 @@ class BoneAgeModel(nn.Module):
 class FlexibleBoneAgePredictor:
     """Bone age predictor that can work with or without gender"""
     
-    def __init__(self, model_path: str, device: str = 'auto'):
-        self.device = self._get_device(device)
-        self.model_path = model_path
-        self.model = None
+    def __init__(self, model_path, device="auto"):
+    # Convert relative path to absolute path if needed
+        self.model_path = _resolve_model_path(model_path)
+    
         self.preprocessor = self._create_preprocessor()
+
+        self.device = self._get_device(device)
+    
+        # Debug output
+        print(f"🔍 Final model path: {self.model_path}")
+        print(f"🔍 Path exists: {os.path.exists(self.model_path)}")
+    
+        if not os.path.exists(self.model_path):
+            raise FileNotFoundError(f"Model not found: {self.model_path}. "
+                               f"Current working directory: {os.getcwd()}")
+    
         self._load_model()
         
     def _get_device(self, device: str) -> str:
@@ -112,40 +154,49 @@ class FlexibleBoneAgePredictor:
         ])
     
     def _load_model(self):
-        """Load your trained model"""
+        """Load the trained model once, using the resolved path & device."""
         print(f"📂 Loading model from: {self.model_path}")
-        
+
         if not os.path.exists(self.model_path):
             raise FileNotFoundError(f"Model not found: {self.model_path}")
-        
-        # Create model with same architecture
-        self.model = BoneAgeModel()
-        
-        # Load checkpoint
+
+        # 1) Build the architecture
+        self.model = BoneAgeModel(pretrained=False)  # pretrained=False for inference
+        self.model.to(self.device)
+
+        # 2) Load checkpoint (map to the already-resolved device)
         try:
-            checkpoint = torch.load(self.model_path, map_location=self.device, weights_only=False)
-            
-            # Try different ways to load the model state
-            if 'model_state_dict' in checkpoint:
-                model_state = checkpoint['model_state_dict']
-                val_mae = checkpoint.get('val_mae', 'Unknown')
-                print(f"📊 Model MAE: {val_mae}")
-            else:
-                # Try loading as direct state dict
-                model_state = checkpoint
-                val_mae = 'Unknown'
-            
-            # Load the state dict
-            self.model.load_state_dict(model_state)
-            self.model.to(self.device)
-            self.model.eval()
-            
-            print(f"✅ Model loaded successfully!")
-            print(f"🔧 Device: {self.device}")
-            
-        except Exception as e:
-            print(f"❌ Error loading model: {e}")
-            raise
+            ckpt = torch.load(self.model_path, map_location=self.device, weights_only=False)
+        except TypeError:
+            # Older torch doesn't support weights_only
+            ckpt = torch.load(self.model_path, map_location=self.device)
+
+        # 3) Extract a state_dict no matter how it was saved
+        if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
+            state_dict = ckpt["model_state_dict"]
+            val_mae = ckpt.get("val_mae", "Unknown")
+            print(f"📊 Model MAE: {val_mae}")
+        elif isinstance(ckpt, dict):
+            # Some training scripts save a raw state_dict
+            state_dict = ckpt
+        else:
+            raise RuntimeError("Unexpected checkpoint format (not a dict).")
+
+        # 4) Normalize keys (strip 'module.' if saved with DataParallel/DDP)
+        if any(k.startswith("module.") for k in state_dict.keys()):
+            state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
+
+        # 5) Load weights
+        missing, unexpected = self.model.load_state_dict(state_dict, strict=False)
+        if missing:
+            print(f"⚠️ Missing keys in state_dict: {missing}")
+        if unexpected:
+            print(f"⚠️ Unexpected keys in state_dict: {unexpected}")
+
+        # 6) Finalize
+        self.model.eval()
+        print("✅ Model loaded successfully!")
+        print(f"🔧 Device: {self.device}")
     
     def _preprocess_image(self, image_path: str) -> torch.Tensor:
         """Preprocess single image"""

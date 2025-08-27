@@ -17,7 +17,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 sys.path.append(str(BASE_DIR))
 
-from bone_age.predictor import FlexibleBoneAgePredictor
+from bone_age.predictor import get_predictor as get_p
 
 # Utility: normalize pixel values to 0-255 for display
 def normalize_to_uint8(image):
@@ -30,8 +30,8 @@ def normalize_to_uint8(image):
 # Accesses the best_bone_age_model.pth file
 @st.cache_resource
 def get_predictor():
-    model_path = Path(__file__).resolve().parent.parent.parent / "best_bone_age_model.pth"
-    predictor = FlexibleBoneAgePredictor(str(model_path))
+    model_path = Path(__file__).resolve().parent.parent.parent / "models" / "best_bone_age_model.pth"
+    predictor = get_p(str(model_path))
     return predictor
 
 # Uses the get_predictor helper function to load the model and return the pretrained

@@ -10,6 +10,31 @@ from app import helpers
 from dataclasses import asdict
 from bone_age.predictor import PredictionResult
 import time
+from pathlib import Path
+from bone_age.predictor import get_predictor
+import os
+
+# Initialize predictor only once using session state:cite[3]:cite[8]
+if 'bone_age_predictor' not in st.session_state:
+    project_root = Path(__file__).parent.parent.parent
+    model_path = project_root / "models" / "best_bone_age_model.pth"
+    
+    print(f"🔍 Initializing predictor with path: {model_path}")
+    print(f"🔍 Path exists: {os.path.exists(model_path)}")
+    
+    if not os.path.exists(model_path):
+        st.error(f"❌ Model file not found at: {model_path}")
+        st.stop()
+    
+    # Initialize and store in session state
+    st.session_state.bone_age_predictor = get_predictor(
+        model_path=str(model_path), 
+        device="auto"
+    )
+    print(f"✅ Predictor initialized and stored in session state")
+
+# Get the predictor from session state
+predictor = st.session_state.bone_age_predictor
 
 def display():
     uploaded_file = st.session_state.get("uploaded_file")
@@ -54,6 +79,12 @@ def display():
         
         results = []
         for index, uploaded_file in enumerate(uploaded_files):
+
+            # --- Get metadata from session (define BEFORE using later) ---
+            patient_name = st.session_state.get(f"name_{index}", f"Patient {index + 1}")
+            patient_id   = st.session_state.get(f"id_{index}", f"ID_{index + 1}")
+            sex_label    = st.session_state.get(f"sex_{index}", "Unknown")
+
             file_ext = uploaded_file.name.lower().split('.')[-1]
 
             bar = st.progress(0, text="Starting analysis...")
@@ -70,11 +101,6 @@ def display():
             else:
                 image = Image.open(uploaded_file)
                 image = np.array(image)
-
-            # --- Get metadata from session (define BEFORE using later) ---
-            patient_name = st.session_state.get(f"name_{index}", f"Patient {index + 1}")
-            patient_id   = st.session_state.get(f"id_{index}", f"ID_{index + 1}")
-            sex_label    = st.session_state.get(f"sex_{index}", "Unknown")
 
             # --- Map sex to predictor input; force a single-output mode for UI ---
             sex_for_pred = helpers.map_sex_format(sex_label)
