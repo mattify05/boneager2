@@ -20,18 +20,62 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from typing import Dict, List, Optional, Union
 import os
+import yaml
 from dataclasses import dataclass
-import warnings
-import inspect
-warnings.filterwarnings('ignore')
+from .utils import (
+    make_preprocessor,
+    preprocess_image_path,
+    read_image_rgb,
+    sanitize_state_dict,
+    mc_noise_predict,
+    summarize_predictions,
+    developmental_stage,
+    sha256_of,
+    file_exists,
+)
 
 # Single source of truth for default relative location
 DEFAULT_MODEL_REL = Path("models") / "best_bone_age_model.pth"
+DEFAULTS_YAML = Path(__file__).resolve().parents[1] / "config" / "defaults.yaml"
+
+def _load_model_path_from_yaml() -> str | None:
+    """Return model path from config/defaults.yaml if present, else None."""
+    try:
+        if DEFAULTS_YAML.exists():
+            with open(DEFAULTS_YAML, 'r') as file:
+                cfg = yaml.safe_load(file) or {}
+                # Accept keys
+                return (
+                    cfg.get("model_path")
+                    or cfg.get("model")
+                    or cfg.get("paths", {}).get("model")
+                )
+    except Exception:
+        #silent exception; logging here is optional
+        pass
+    return None
 
 def _resolve_model_path(path_str: str | None) -> str:
-    # Priority: explicit arg → env var → default
-    env = os.getenv("BONEAGER_MODEL")
-    raw = path_str or env or str(DEFAULT_MODEL_REL)
+    """
+    Resolution priority:
+      1) explicit function argument
+      2) env var BONEAGER_MODEL
+      3) config/defaults.yaml (model_path)
+      4) repository default: models/best_bone_age_model.pth
+    Relative paths are anchored to the repo root.
+    """
+    # 1) arg
+    if path_str:
+        raw = path_str
+    else:
+        # 2) env
+        env = os.getenv("BONEAGER_MODEL")
+        if env:
+            raw = env
+        else:
+            # 3) yaml config
+            yaml_path = _load_model_path_from_yaml()
+            raw = yaml_path if yaml_path else str(DEFAULT_MODEL_REL)
 
     p = Path(raw)
     if p.is_absolute():
@@ -39,8 +83,6 @@ def _resolve_model_path(path_str: str | None) -> str:
     else:
         repo_root = Path(__file__).resolve().parents[1]
         final = str((repo_root / p).resolve())
-
-    print(f"    resolved -> {final}")
     return final
 
 _PREDICTOR_CACHE = {}
@@ -69,7 +111,7 @@ class BoneAgeModel(nn.Module):
         super(BoneAgeModel, self).__init__()
         
         # Use EfficientNet-B0 backbone (same as training)
-        self.backbone = models.efficientnet_b0(pretrained=pretrained)
+        self.backbone = models.efficientnet_b0(weights=None)
         feature_dim = self.backbone.classifier[1].in_features
         self.backbone.classifier = nn.Identity()
         
@@ -125,7 +167,7 @@ class FlexibleBoneAgePredictor:
     # Convert relative path to absolute path if needed
         self.model_path = _resolve_model_path(model_path)
     
-        self.preprocessor = self._create_preprocessor()
+        self.preprocessor = make_preprocessor(img_size=384, use_clahe=True)    
 
         self.device = self._get_device(device)
     
@@ -144,14 +186,14 @@ class FlexibleBoneAgePredictor:
             return 'cuda' if torch.cuda.is_available() else 'cpu'
         return device
     
-    def _create_preprocessor(self):
-        """Create preprocessing pipeline matching training"""
-        return A.Compose([
-            A.Resize(384, 384),  # Same size as training
-            A.CLAHE(clip_limit=2.0, tile_grid_size=(4, 4), p=1.0),
-            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ToTensorV2()
-        ])
+    # def _create_preprocessor(self):
+    #     """Create preprocessing pipeline matching training"""
+    #     return A.Compose([
+    #         A.Resize(384, 384),  # Same size as training
+    #         A.CLAHE(clip_limit=2.0, tile_grid_size=(4, 4), p=1.0),
+    #         A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    #         ToTensorV2()
+    #     ])
     
     def _load_model(self):
         """Load the trained model once, using the resolved path & device."""
@@ -200,22 +242,7 @@ class FlexibleBoneAgePredictor:
     
     def _preprocess_image(self, image_path: str) -> torch.Tensor:
         """Preprocess single image"""
-        try:
-            # Load image
-            image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-            if image is None:
-                raise ValueError(f"Could not load image: {image_path}")
-            
-            # Convert to RGB for preprocessing
-            image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-            
-            # Apply preprocessing
-            transformed = self.preprocessor(image=image)
-            return transformed['image'].unsqueeze(0)  # Add batch dimension
-            
-        except Exception as e:
-            print(f"❌ Error preprocessing image {image_path}: {e}")
-            raise
+        return preprocess_image_path(image_path, self.preprocessor).to(self.device)
     
     def predict_single_image(self, image_path: str, gender: Union[int, str, None] = None, 
                            use_tta: bool = False) -> Union[PredictionResult, List[PredictionResult]]:

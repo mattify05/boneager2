@@ -1,0 +1,4 @@
+model_path: models/best_bone_age_model.pth
+device: auto
+image_size: 384
+use_tta: true
